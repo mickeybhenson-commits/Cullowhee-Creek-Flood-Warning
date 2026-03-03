@@ -16,13 +16,13 @@ st.set_page_config(
     page_title="NOAH: Cullowhee Hydrologic Sentinel",
     layout="wide"
 )
-# 5-minute sync interval for Jackson County sub-watersheds
+# Automated refresh to keep the "lab" data current
 st_autorefresh(interval=300000, key="refresh")
 
-# Site Metadata
+# Site Metadata (Unique to Cullowhee/NCCAT)
 LAT, LON = 35.3079, -83.1746
 SITE = "Cullowhee Creek — Cullowhee, NC"
-BASE_FLOW_IN = 6.0  
+BASE_FLOW_IN = 6.0  # Your 6-inch baseline
 
 # Secrets (Manage via Streamlit Cloud Dashboard)
 AMBIENT_API_KEY = st.secrets.get("AMBIENT_API_KEY", "9ed066cb260c42adbe8778e0afb09e747f8450a7dd20479791a18d692b722334")
@@ -41,18 +41,18 @@ html, body, .stApp { background-color: #060C14; color: #E0E8F0; font-family: 'Ra
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-#  HYDROLOGIC LOGIC (The "Dial-In" Engine)
+#  HYDROLOGIC LOGIC (Model Calibration)
 # ─────────────────────────────────────────────
 
 def estimate_creek_flow(current_depth_in):
-    """ Power-law rating curve calibrated for Cullowhee Creek """
+    """ Calibrate the c_multiplier based on NCCAT observations """
     stage_ft = max(0, (current_depth_in - BASE_FLOW_IN) / 12.0)
     c_multiplier = 30.0 
     calc_flow = c_multiplier * (stage_ft ** 1.5)
     return round(calc_flow + 5, 1)
 
 def estimate_soil_moisture(rain_30d, today_rain=0.0):
-    """ Water Balance Model for mountain clay loam """
+    """ Correct storage based on mountain clay loam physics """
     FIELD_CAPACITY, WILTING_POINT, MAX_STORAGE = 2.16, 1.80, 2.66
     storage = FIELD_CAPACITY * 0.7 
     for rain in rain_30d: storage = max(WILTING_POINT, min(MAX_STORAGE, storage + rain - 0.08))
@@ -80,17 +80,17 @@ def make_gauge(value, title, min_val=0, max_val=100, unit="%", color="#0088FF"):
     return fig
 
 # ─────────────────────────────────────────────
-#  PROCESSING & UI
+#  PROCESSING & ALERTS
 # ─────────────────────────────────────────────
 ambient = fetch_ambient()
 rain_now = ambient.get("rain", 0.0)
 
-# INPUTS (Mappable to real sensors once NCCAT lab is live)
+# INPUTS (Ready for real-world lab data)
 creek_depth_raw = 10.5 
 creek_flow_cfs = estimate_creek_flow(creek_depth_raw)
 soil_pct, soil_status, soil_color, _ = estimate_soil_moisture([0.05]*30, rain_now)
 
-# CRISIS TRIGGER LOGIC
+# CRISIS BANNERS
 if creek_flow_cfs > 250 or soil_pct > 95:
     st.markdown(f'<div class="crisis-banner" style="background:rgba(255,51,51,0.2); border-color:#FF3333; color:#FF3333;">⚠️ CRITICAL FLOOD ALERT: SURGE DETECTED ({creek_flow_cfs} CFS)</div>', unsafe_allow_html=True)
 elif creek_flow_cfs > 120 or soil_pct > 85:
@@ -104,13 +104,12 @@ with c2: st.plotly_chart(make_gauge(soil_pct, "SOIL SATURATION", 0, 100, "%", so
 with c3: st.plotly_chart(make_gauge(rain_now, "RAIN TODAY", 0, 5, "\"", "#0088FF"), use_container_width=True)
 with c4: st.plotly_chart(make_gauge(ambient.get("temp", 72), "TEMPERATURE", 0, 110, "°F", "#FF8C00"), use_container_width=True)
 
-# AUTOMATED OFFICIAL NWS RADAR LOOP [cite: 2025-10-29]
+# ENLARGED MISSION CRITICAL MAP
 st.markdown('<div class="panel"><div class="panel-title">📡 Official NWS Radar Loop — Automatic Looping Enabled</div>', unsafe_allow_html=True)
-# This iframe points to the auto-playing GIF loop for the KGSP sector
 st.components.v1.html(
     '<iframe src="https://radar.weather.gov/ridge/standard/KGSP_loop.gif" '
-    'width="100%" height="700" frameborder="0" style="border-radius:10px;"></iframe>', 
-    height=710
+    'width="100%" height="900" frameborder="0" style="border-radius:10px;"></iframe>', 
+    height=910
 )
 st.markdown('</div>', unsafe_allow_html=True)
 
