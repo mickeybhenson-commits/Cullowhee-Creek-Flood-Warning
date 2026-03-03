@@ -1046,7 +1046,7 @@ st.components.v1.html("""
   <img
     id="radarImg"
     class="radar-img"
-    src="https://radar.weather.gov/ridge/lite/N0Q/GSP_loop.gif"
+    src="https://radar.weather.gov/ridge/lite/KGSP_loop.gif"
     alt="NWS Radar Loop KGSP"
     onerror="tryFallback()"
   />
@@ -1080,8 +1080,8 @@ st.components.v1.html("""
 <script>
   // ── Bust cache every 120 s so the GIF always shows the freshest frames ──
   const REFRESH_MS = 120000;
-  const BASE_URL   = "https://radar.weather.gov/ridge/lite/N0Q/GSP_loop.gif";
-  const FALLBACK   = "https://radar.weather.gov/ridge/lite/N0R/GSP_loop.gif";
+  const BASE_URL   = "https://radar.weather.gov/ridge/lite/KGSP_loop.gif";
+  const FALLBACK   = "https://radar.weather.gov/ridge/lite/KGSP_0.gif";
 
   let usedFallback = false;
 
