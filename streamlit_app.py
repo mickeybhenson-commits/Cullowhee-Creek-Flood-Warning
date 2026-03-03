@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-import pytz # Added for explicit EST timezone handling
+import pytz 
 from streamlit_autorefresh import st_autorefresh
 
 # ─────────────────────────────────────────────
@@ -18,7 +18,7 @@ st.set_page_config(
 )
 st_autorefresh(interval=300000, key="refresh")
 
-# Site Metadata & Timezone
+# Site Metadata & EST Timezone
 LAT, LON = 35.3079, -83.1746
 SITE = "Cullowhee Creek — Cullowhee, NC"
 BASE_FLOW_IN = 6.0  
@@ -41,18 +41,16 @@ html, body, .stApp { background-color: #060C14; color: #E0E8F0; font-family: 'Ra
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-#  HYDROLOGIC MODELS (NCCAT Lab Calibration)
+#  HYDROLOGIC MODELS (Calibration Mode)
 # ─────────────────────────────────────────────
 
 def estimate_creek_flow(current_depth_in):
-    """ Power-law rating curve calibrated for Cullowhee """
     stage_ft = max(0, (current_depth_in - BASE_FLOW_IN) / 12.0)
     c_multiplier = 30.0 
     calc_flow = c_multiplier * (stage_ft ** 1.5)
     return round(calc_flow + 5, 1)
 
 def estimate_soil_moisture(rain_30d, today_rain=0.0):
-    """ Water Balance Model for mountain clay loam """
     FIELD_CAPACITY, WILTING_POINT, MAX_STORAGE = 2.16, 1.80, 2.66
     storage = FIELD_CAPACITY * 0.7 
     for rain in rain_30d: storage = max(WILTING_POINT, min(MAX_STORAGE, storage + rain - 0.08))
@@ -66,30 +64,38 @@ def fetch_ambient():
     try:
         r = requests.get("https://api.ambientweather.net/v1/devices", params={"apiKey": AMBIENT_API_KEY, "applicationKey": AMBIENT_APP_KEY}, timeout=10)
         last = r.json()[0].get("lastData", {})
-        return {"temp": last.get("tempf"), "hum": last.get("humidity"), "wind": last.get("windspeedmph", 0), "rain": last.get("dailyrainin", 0.0), "ok": True}
+        return {
+            "temp": last.get("tempf"), 
+            "hum": last.get("humidity"), 
+            "wind": last.get("windspeedmph", 0), 
+            "rain": last.get("dailyrainin", 0.0), 
+            "hourly_rain": last.get("hourlyrainin", 0.0), # Tactical Intensity
+            "ok": True
+        }
     except: return {"ok": False}
 
 def make_gauge(value, title, min_val=0, max_val=100, unit="%", color="#0088FF", steps=None):
     fig = go.Figure(go.Indicator(
         mode="gauge+number", value=value,
-        number={"suffix": unit, "font": {"size": 26, "color": "#FFFFFF", "family": "Rajdhani"}},
+        number={"suffix": unit, "font": {"size": 24, "color": "#FFFFFF", "family": "Rajdhani"}},
         title={"text": title, "font": {"size": 11, "color": "#7AACCC", "family": "Share Tech Mono"}},
         gauge={"axis": {"range": [min_val, max_val], "tickfont": {"size": 8}}, "bar": {"color": color, "thickness": 0.25}, "bgcolor": "rgba(0,0,0,0)", "steps": steps if steps else []}
     ))
-    fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", margin=dict(t=35, b=5, l=15, r=15), height=185)
+    fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", margin=dict(t=35, b=5, l=15, r=15), height=175)
     return fig
 
 # ─────────────────────────────────────────────
-#  PROCESSING & TIME SYNC (EST)
+#  GROUND TRUTH PROCESSING (AWN)
 # ─────────────────────────────────────────────
 current_time_est = datetime.now(EST_TZ).strftime("%m/%d/%Y %I:%M %p EST")
 ambient = fetch_ambient()
-rain_now = ambient.get("rain", 0.0)
+rain_total = ambient.get("rain", 0.0)
+rain_intensity = ambient.get("hourly_rain", 0.0)
 
-# INPUTS (Mappable to real sensors at NCCAT) [cite: 2026-02-16]
+# INPUTS (Mappable to real sensors at NCCAT) [cite: 2025-10-29]
 creek_depth_raw = 6.0 # BASEFLOW 
 creek_flow_cfs = estimate_creek_flow(creek_depth_raw)
-soil_pct, soil_status, soil_color, _ = estimate_soil_moisture([0.0]*30, rain_now)
+soil_pct, soil_status, soil_color, _ = estimate_soil_moisture([0.0]*30, rain_total)
 
 # CRISIS TRIGGER LOGIC [cite: 2026-01-31]
 if creek_depth_raw > 60:
@@ -99,9 +105,9 @@ elif creek_depth_raw == 60:
 
 st.markdown(f'<div class="site-header"><div class="site-title">NOAH | CULLOWHEE HYDROMETRIC SENTINEL</div><div style="color:#7AACCC; font-family:\'Share Tech Mono\';">{SITE} | {current_time_est}</div></div>', unsafe_allow_html=True)
 
-# ROW 1: PRIMARY HYDROMETRICS
-st.markdown('<div class="panel"><div class="panel-title">🌊 Primary Hydrologic State</div>', unsafe_allow_html=True)
-c1, c2, c3, c4, c5 = st.columns(5)
+# ROW 1: MISSION COMMAND HYDROMETRICS
+st.markdown('<div class="panel"><div class="panel-title">🌊 Primary Hydrologic State — Ground Truth Active</div>', unsafe_allow_html=True)
+c1, c2, c3, c4, c5, c6 = st.columns(6)
 
 with c1:
     depth_color = "#FF3333" if creek_depth_raw > 60 else "#FFFF00" if creek_depth_raw == 60 else "#0088FF"
@@ -110,11 +116,12 @@ with c1:
 
 with c2: st.plotly_chart(make_gauge(creek_flow_cfs, "EST. CREEK FLOW", 0, 1000, " CFS", ("#FF3333" if creek_depth_raw > 60 else "#00FF9C")), use_container_width=True)
 with c3: st.plotly_chart(make_gauge(soil_pct, "SOIL SATURATION", 0, 100, "%", soil_color), use_container_width=True)
-with c4: st.plotly_chart(make_gauge(rain_now, "RAIN TODAY", 0, 5, "\"", "#0088FF"), use_container_width=True)
-with c5: st.plotly_chart(make_gauge(ambient.get("temp", 72), "TEMPERATURE", 0, 110, "°F", "#FF8C00"), use_container_width=True)
+with c4: st.plotly_chart(make_gauge(rain_intensity, "RAIN INTENSITY", 0, 4, "\"/HR", "#5AC8FA"), use_container_width=True)
+with c5: st.plotly_chart(make_gauge(rain_total, "RAIN TODAY", 0, 5, "\"", "#0088FF"), use_container_width=True)
+with c6: st.plotly_chart(make_gauge(ambient.get("temp", 72), "TEMPERATURE", 0, 110, "°F", "#FF8C00"), use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
-# 1800px COMMAND RADAR
+# 1800px MISSION COMMAND RADAR
 st.markdown('<div class="panel"><div class="panel-title">📡 Official NWS Radar Loop — Mission Command Footprint</div>', unsafe_allow_html=True)
 st.components.v1.html(
     '<iframe src="https://radar.weather.gov/ridge/standard/KGSP_loop.gif" '
@@ -123,4 +130,4 @@ st.components.v1.html(
 )
 st.markdown('</div>', unsafe_allow_html=True)
 
-st.markdown(f'<div style="text-align:center; font-family:\'Share Tech Mono\'; font-size:0.75em; color:#2A4060; margin-top:20px;">PROJECT NOAH | {SITE} | Baseline Calibration Active</div>', unsafe_allow_html=True)
+st.markdown(f'<div style="text-align:center; font-family:\'Share Tech Mono\'; font-size:0.75em; color:#2A4060; margin-top:20px;">PROJECT NOAH | {SITE} | AWN Ground Truth Active</div>', unsafe_allow_html=True)
