@@ -17,7 +17,7 @@ st_autorefresh(interval=300000, key="refresh")
 
 LAT = 35.3079
 LON = -83.1746
-SITE = "NCCAT — Cullowhee, NC"
+SITE = "Cullowhee Creek Watershed — Cullowhee, NC"
 
 AMBIENT_API_KEY = st.secrets.get("AMBIENT_API_KEY", "9ed066cb260c42adbe8778e0afb09e747f8450a7dd20479791a18d692b722334")
 AMBIENT_APP_KEY = st.secrets.get("AMBIENT_APP_KEY", "9ed066cb260c42adbe8778e0afb09e747f8450a7dd20479791a18d692b722334")
