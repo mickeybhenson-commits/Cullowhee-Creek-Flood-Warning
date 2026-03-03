@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import math
+import json
 import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
@@ -11,7 +12,7 @@ st.set_page_config(
     page_title="Cullowhee Creek Watershed Flood Warning",
     layout="wide"
 )
-st_autorefresh(interval=300000, key="refresh")
+st_autorefresh(interval=30000, key="refresh")   # 30-second refresh — drives creek jitter
 
 LAT = 35.3079
 LON = -83.1746
@@ -392,6 +393,198 @@ def srctag(text):
     return f"<div style='text-align:center;font-family:Share Tech Mono,monospace;font-size:0.62em;color:#1A5070;margin-top:1px;'>SRC: {text}</div>"
 
 # ─────────────────────────────────────────────
+#  ANIMATED CANVAS GAUGE (creek sensors only)
+# ─────────────────────────────────────────────
+def make_animated_gauge_html(gauge_id, value, title, min_val, max_val, unit,
+                              thresholds, needle_color,
+                              sublabel_text, sublabel_color,
+                              subsub_text, src_text):
+    """
+    Returns a self-contained HTML block with a canvas-based animated gauge.
+    The needle eases from min_val to `value` on every render, giving a live
+    sweep effect each time Streamlit re-runs (every 30 s).
+    """
+    thresh_js = json.dumps([
+        {"r0": t["range"][0], "r1": t["range"][1], "color": t["color"]}
+        for t in thresholds
+    ])
+    decimals = 2 if (max_val - min_val) < 5 else 1
+
+    return f"""
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+  body {{ margin:0; padding:0; background:transparent; overflow:hidden; }}
+  .gauge-wrap {{ text-align:center; padding:4px 0 6px 0; background:transparent; }}
+  .gauge-label {{
+    font-family:'Rajdhani',sans-serif; font-size:15px; font-weight:700;
+    color:{sublabel_color}; margin:2px 0 1px 0; letter-spacing:1px;
+  }}
+  .gauge-sub {{
+    font-family:'Rajdhani',sans-serif; font-size:12px; color:#7AACCC; margin:0;
+  }}
+  .gauge-src {{
+    font-family:'Share Tech Mono',monospace; font-size:9px;
+    color:#1A5070; margin-top:2px;
+  }}
+</style>
+</head>
+<body>
+<div class="gauge-wrap">
+  <canvas id="{gauge_id}" width="260" height="155"
+    style="display:block;margin:0 auto;max-width:100%;"></canvas>
+  <div class="gauge-label">{sublabel_text}</div>
+  <div class="gauge-sub">{subsub_text}</div>
+  <div class="gauge-src">SRC: {src_text}</div>
+</div>
+<script>
+(function() {{
+  const canvas  = document.getElementById('{gauge_id}');
+  if (!canvas) return;
+  const ctx     = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const cx = W / 2;
+  const cy = Math.round(H * 0.80);
+  const R  = Math.round(Math.min(W * 0.46, H * 0.76));
+
+  const MIN_VAL    = {min_val};
+  const MAX_VAL    = {max_val};
+  const TARGET_VAL = {value};
+  const UNIT       = "{unit}";
+  const DECIMALS   = {decimals};
+  const NEEDLE_CLR = "{needle_color}";
+  const THRESHOLDS = {thresh_js};
+
+  const ANIM_MS  = 1400;   // sweep duration
+  const START_TS = performance.now();
+
+  // map value → canvas angle (π = left, 2π = right)
+  function toAngle(v) {{
+    return Math.PI + ((v - MIN_VAL) / (MAX_VAL - MIN_VAL)) * Math.PI;
+  }}
+
+  function easeOutBack(t) {{
+    const c1 = 1.70158, c3 = c1 + 1;
+    return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+  }}
+
+  function hexAlpha(cssColor, alpha) {{
+    // cssColor is rgba(...) already; just return it
+    return cssColor;
+  }}
+
+  function drawFrame(val) {{
+    ctx.clearRect(0, 0, W, H);
+
+    // ── Zone arcs ──────────────────────────────────────────────
+    THRESHOLDS.forEach(t => {{
+      const a1 = toAngle(t.r0), a2 = toAngle(t.r1);
+      ctx.beginPath();
+      ctx.arc(cx, cy, R, a1, a2);
+      ctx.lineWidth  = 22;
+      ctx.strokeStyle = t.color;
+      ctx.lineCap    = 'butt';
+      ctx.stroke();
+    }});
+
+    // ── Outer border arc ───────────────────────────────────────
+    ctx.beginPath();
+    ctx.arc(cx, cy, R + 1, Math.PI, 2 * Math.PI);
+    ctx.lineWidth   = 1.2;
+    ctx.strokeStyle = 'rgba(0,119,255,0.25)';
+    ctx.stroke();
+
+    // ── Tick marks + labels ────────────────────────────────────
+    const TICKS = 8;
+    ctx.font         = '8.5px "Share Tech Mono", monospace';
+    ctx.fillStyle    = '#3A5A7A';
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+    for (let i = 0; i <= TICKS; i++) {{
+      const tv    = MIN_VAL + (MAX_VAL - MIN_VAL) * (i / TICKS);
+      const angle = toAngle(tv);
+      const cos   = Math.cos(angle), sin = Math.sin(angle);
+      // inner tick
+      ctx.beginPath();
+      ctx.moveTo(cx + (R - 14) * cos, cy + (R - 14) * sin);
+      ctx.lineTo(cx + (R + 3)  * cos, cy + (R + 3)  * sin);
+      ctx.lineWidth   = 1;
+      ctx.strokeStyle = 'rgba(58,90,122,0.7)';
+      ctx.stroke();
+      // label
+      const lx = cx + (R - 30) * cos;
+      const ly = cy + (R - 30) * sin;
+      ctx.fillText(tv.toFixed(DECIMALS), lx, ly);
+    }}
+
+    // ── Needle glow ────────────────────────────────────────────
+    const na  = toAngle(val);
+    const nLen = R - 6;
+    const nx  = cx + nLen * Math.cos(na);
+    const ny  = cy + nLen * Math.sin(na);
+
+    ctx.shadowColor = NEEDLE_CLR;
+    ctx.shadowBlur  = 12;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(nx, ny);
+    ctx.lineWidth   = 3.5;
+    ctx.strokeStyle = NEEDLE_CLR;
+    ctx.lineCap     = 'round';
+    ctx.stroke();
+    ctx.shadowBlur  = 0;
+
+    // ── Needle base ────────────────────────────────────────────
+    ctx.beginPath();
+    ctx.arc(cx, cy, 9, 0, 2 * Math.PI);
+    ctx.fillStyle = NEEDLE_CLR;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx, cy, 5, 0, 2 * Math.PI);
+    ctx.fillStyle = '#04090F';
+    ctx.fill();
+
+    // ── Value readout ──────────────────────────────────────────
+    ctx.shadowColor = NEEDLE_CLR;
+    ctx.shadowBlur  = 6;
+    ctx.font        = 'bold 22px "Rajdhani", sans-serif';
+    ctx.fillStyle   = '#FFFFFF';
+    ctx.textAlign   = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(val.toFixed(DECIMALS) + UNIT, cx, cy - R * 0.38);
+    ctx.shadowBlur  = 0;
+
+    // ── Title ──────────────────────────────────────────────────
+    ctx.font      = '9.5px "Share Tech Mono", monospace';
+    ctx.fillStyle = '#5A8AAA';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText('{title}', cx, H - 2);
+  }}
+
+  function animate(ts) {{
+    const elapsed  = ts - START_TS;
+    const progress = Math.min(elapsed / ANIM_MS, 1);
+    const eased    = easeOutBack(progress);
+    // clamp so easeOutBack overshoot doesn't exceed range
+    const cur = Math.max(MIN_VAL, Math.min(MAX_VAL,
+                  MIN_VAL + (TARGET_VAL - MIN_VAL) * eased));
+    drawFrame(cur);
+    if (progress < 1) requestAnimationFrame(animate);
+  }}
+
+  requestAnimationFrame(animate);
+}})();
+</script>
+</body>
+</html>
+"""
+
+# ─────────────────────────────────────────────
 #  DYNAMIC JITTER LOGIC (Simulation Mode)
 #  Depth : 5.50 – 6.50 inches
 #  Flow  : 4.89 – 5.35 cfs
@@ -619,30 +812,48 @@ with h1:
     st.markdown(srctag("WATER BALANCE MODEL"), unsafe_allow_html=True)
 
 with h2:
-    fig = make_gauge(creek_depth, "CREEK DEPTH", min_val=5.50, max_val=6.50, unit='"', color=cd_color,
-        thresholds=[
-            {"range":[5.50, 5.65], "color":"rgba(90,200,250,0.12)"},
-            {"range":[5.65, 6.10], "color":"rgba(0,255,156,0.12)"},
-            {"range":[6.10, 6.35], "color":"rgba(255,215,0,0.12)"},
-            {"range":[6.35, 6.50], "color":"rgba(255,51,51,0.12)"},
-        ])
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-    st.markdown(sublabel(cd_label, cd_color), unsafe_allow_html=True)
-    st.markdown(subsub(f"Depth: <b style='color:#00FFCC'>{creek_depth}&quot;</b>"), unsafe_allow_html=True)
-    st.markdown(srctag("NEMO / SIMULATION"), unsafe_allow_html=True)
+    depth_html = make_animated_gauge_html(
+        gauge_id      = "gauge_depth",
+        value         = creek_depth,
+        title         = "CREEK DEPTH",
+        min_val       = DEPTH_MIN,
+        max_val       = DEPTH_MAX,
+        unit          = '"',
+        thresholds    = [
+            {"range": [5.50, 5.65], "color": "rgba(90,200,250,0.18)"},
+            {"range": [5.65, 6.10], "color": "rgba(0,255,156,0.18)"},
+            {"range": [6.10, 6.35], "color": "rgba(255,215,0,0.18)"},
+            {"range": [6.35, 6.50], "color": "rgba(255,51,51,0.20)"},
+        ],
+        needle_color  = cd_color,
+        sublabel_text = cd_label,
+        sublabel_color= cd_color,
+        subsub_text   = f'Depth: {creek_depth}"',
+        src_text      = "NEMO / SIMULATION"
+    )
+    st.components.v1.html(depth_html, height=230, scrolling=False)
 
 with h3:
-    fig = make_gauge(creek_flow, "CREEK FLOW RATE", min_val=4.89, max_val=5.35, unit=" cfs", color=cf_color,
-        thresholds=[
-            {"range":[4.89, 4.97], "color":"rgba(90,200,250,0.12)"},
-            {"range":[4.97, 5.15], "color":"rgba(0,255,156,0.12)"},
-            {"range":[5.15, 5.26], "color":"rgba(255,215,0,0.12)"},
-            {"range":[5.26, 5.35], "color":"rgba(255,51,51,0.12)"},
-        ])
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-    st.markdown(sublabel(cf_label, cf_color), unsafe_allow_html=True)
-    st.markdown(subsub(f"Flow: <b style='color:#00FFCC'>{creek_flow} cfs</b>"), unsafe_allow_html=True)
-    st.markdown(srctag("NEMO / SIMULATION"), unsafe_allow_html=True)
+    flow_html = make_animated_gauge_html(
+        gauge_id      = "gauge_flow",
+        value         = creek_flow,
+        title         = "CREEK FLOW RATE",
+        min_val       = FLOW_MIN,
+        max_val       = FLOW_MAX,
+        unit          = " cfs",
+        thresholds    = [
+            {"range": [4.89, 4.97], "color": "rgba(90,200,250,0.18)"},
+            {"range": [4.97, 5.15], "color": "rgba(0,255,156,0.18)"},
+            {"range": [5.15, 5.26], "color": "rgba(255,215,0,0.18)"},
+            {"range": [5.26, 5.35], "color": "rgba(255,51,51,0.20)"},
+        ],
+        needle_color  = cf_color,
+        sublabel_text = cf_label,
+        sublabel_color= cf_color,
+        subsub_text   = f"Flow: {creek_flow} cfs",
+        src_text      = "NEMO / SIMULATION"
+    )
+    st.components.v1.html(flow_html, height=230, scrolling=False)
 
 with h4:
     st.markdown(f"""
