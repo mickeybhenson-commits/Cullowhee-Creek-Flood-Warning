@@ -21,7 +21,7 @@ st_autorefresh(interval=300000, key="refresh")
 # Site Metadata
 LAT, LON = 35.3079, -83.1746
 SITE = "Cullowhee Creek — Cullowhee, NC"
-BASE_FLOW_IN = 6.0  # NCCAT established baseline [cite: 2025-10-29]
+BASE_FLOW_IN = 6.0  # NCCAT baseline [cite: 2025-10-29]
 
 # Secrets
 AMBIENT_API_KEY = st.secrets.get("AMBIENT_API_KEY", "9ed066cb260c42adbe8778e0afb09e747f8450a7dd20479791a18d692b722334")
@@ -68,12 +68,17 @@ def fetch_ambient():
         return {"temp": last.get("tempf"), "hum": last.get("humidity"), "wind": last.get("windspeedmph", 0), "rain": last.get("dailyrainin", 0.0), "ok": True}
     except: return {"ok": False}
 
-def make_gauge(value, title, min_val=0, max_val=100, unit="%", color="#0088FF"):
+def make_gauge(value, title, min_val=0, max_val=100, unit="%", color="#0088FF", steps=None):
     fig = go.Figure(go.Indicator(
         mode="gauge+number", value=value,
         number={"suffix": unit, "font": {"size": 26, "color": "#FFFFFF", "family": "Rajdhani"}},
         title={"text": title, "font": {"size": 11, "color": "#7AACCC", "family": "Share Tech Mono"}},
-        gauge={"axis": {"range": [min_val, max_val], "tickfont": {"size": 8}}, "bar": {"color": color, "thickness": 0.25}, "bgcolor": "rgba(0,0,0,0)"}
+        gauge={
+            "axis": {"range": [min_val, max_val], "tickfont": {"size": 8}},
+            "bar": {"color": color, "thickness": 0.25},
+            "bgcolor": "rgba(0,0,0,0)",
+            "steps": steps if steps else []
+        }
     ))
     fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", margin=dict(t=35, b=5, l=15, r=15), height=185)
     return fig
@@ -85,31 +90,40 @@ ambient = fetch_ambient()
 rain_now = ambient.get("rain", 0.0)
 
 # INPUTS (Mappable to real sensors at NCCAT) [cite: 2026-02-16]
-creek_depth_raw = 10.5 
+creek_depth_raw = 65.0 # SIMULATED DEPTH FOR FLOOD DEMONSTRATION
 creek_flow_cfs = estimate_creek_flow(creek_depth_raw)
 soil_pct, soil_status, soil_color, _ = estimate_soil_moisture([0.05]*30, rain_now)
 
-# CRISIS TRIGGER LOGIC
-if creek_flow_cfs > 250 or soil_pct > 95:
-    st.markdown(f'<div class="crisis-banner" style="background:rgba(255,51,51,0.2); border-color:#FF3333; color:#FF3333;">⚠️ CRITICAL FLOOD ALERT: SURGE DETECTED ({creek_flow_cfs} CFS)</div>', unsafe_allow_html=True)
-elif creek_flow_cfs > 120 or soil_pct > 85:
-    st.markdown(f'<div class="crisis-banner" style="background:rgba(255,140,0,0.2); border-color:#FF8C00; color:#FF8C00;">📢 HYDROLOGIC WARNING: ELEVATED DISCHARGE ({creek_flow_cfs} CFS)</div>', unsafe_allow_html=True)
+# CRISIS TRIGGER LOGIC (Integrated with new Depth thresholds)
+if creek_depth_raw > 60:
+    st.markdown(f'<div class="crisis-banner" style="background:rgba(255,51,51,0.2); border-color:#FF3333; color:#FF3333;">🆘 CRITICAL: FLASH FLOODING IN PROGRESS - DEPTH > 60"</div>', unsafe_allow_html=True)
+elif creek_depth_raw >= 60:
+    st.markdown(f'<div class="crisis-banner" style="background:rgba(255,255,0,0.2); border-color:#FFFF00; color:#FFFF00;">⚠️ WARNING: APPROACHING FLOOD STAGE - DEPTH @ 60"</div>', unsafe_allow_html=True)
 
 st.markdown(f'<div class="site-header"><div class="site-title">NOAH | CULLOWHEE HYDROMETRIC SENTINEL</div><div style="color:#7AACCC; font-family:\'Share Tech Mono\';">{SITE} | {datetime.now().strftime("%I:%M %p")}</div></div>', unsafe_allow_html=True)
 
-# ROW 1: PRIMARY HYDROMETRICS (Now including Depth Gauge)
+# ROW 1: PRIMARY HYDROMETRICS
 st.markdown('<div class="panel"><div class="panel-title">🌊 Primary Hydrologic State</div>', unsafe_allow_html=True)
 c1, c2, c3, c4, c5 = st.columns(5)
-with c1: st.plotly_chart(make_gauge(creek_depth_raw, "CREEK DEPTH", 0, 48, "\"", "#0088FF"), use_container_width=True)
-with c2: st.plotly_chart(make_gauge(creek_flow_cfs, "EST. CREEK FLOW", 0, 500, " CFS", ("#FF3333" if creek_flow_cfs > 150 else "#00FF9C")), use_container_width=True)
+
+with c1:
+    # Custom Gauge Steps for Depth [cite: 2026-01-31]
+    depth_color = "#FF3333" if creek_depth_raw > 60 else "#FFFF00" if creek_depth_raw == 60 else "#0088FF"
+    depth_steps = [
+        {'range': [0, 60], 'color': "rgba(0, 136, 255, 0.1)"},
+        {'range': [60, 60.1], 'color': "#FFFF00"},
+        {'range': [60.1, 100], 'color': "rgba(255, 51, 51, 0.3)"}
+    ]
+    st.plotly_chart(make_gauge(creek_depth_raw, "CREEK DEPTH", 0, 100, "\"", depth_color, steps=depth_steps), use_container_width=True)
+
+with c2: st.plotly_chart(make_gauge(creek_flow_cfs, "EST. CREEK FLOW", 0, 1000, " CFS", ("#FF3333" if creek_depth_raw > 60 else "#00FF9C")), use_container_width=True)
 with c3: st.plotly_chart(make_gauge(soil_pct, "SOIL SATURATION", 0, 100, "%", soil_color), use_container_width=True)
 with c4: st.plotly_chart(make_gauge(rain_now, "RAIN TODAY", 0, 5, "\"", "#0088FF"), use_container_width=True)
 with c5: st.plotly_chart(make_gauge(ambient.get("temp", 72), "TEMPERATURE", 0, 110, "°F", "#FF8C00"), use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
-# DOUBLE-SIZE MISSION CRITICAL RADAR
+# 1800px MISSION CRITICAL RADAR
 st.markdown('<div class="panel"><div class="panel-title">📡 Official NWS Radar Loop — Mission Command Footprint</div>', unsafe_allow_html=True)
-# Pushed to 1800px height for ultra-detailed sector tracking
 st.components.v1.html(
     '<iframe src="https://radar.weather.gov/ridge/standard/KGSP_loop.gif" '
     'width="100%" height="1800" frameborder="0" style="border-radius:10px;"></iframe>', 
