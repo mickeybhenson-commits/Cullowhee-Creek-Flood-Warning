@@ -5,7 +5,7 @@ import math
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz 
 from streamlit_autorefresh import st_autorefresh
 
@@ -44,50 +44,71 @@ html, body, .stApp { background-color: #060C14; color: #E0E8F0; font-family: 'Ra
 # ─────────────────────────────────────────────
 #  DYNAMIC JITTER LOGIC (Simulation Mode)
 # ─────────────────────────────────────────────
-
-# Initialize values in session state
 if 'creek_depth' not in st.session_state:
     st.session_state.creek_depth = 6.00
 if 'creek_flow' not in st.session_state:
     st.session_state.creek_flow = 5.00
 
-# Creek Depth: Range 5.50" to 6.50", increments of .02"
 d_step = np.random.choice([-0.02, 0.0, 0.02])
 st.session_state.creek_depth = round(max(5.50, min(6.50, st.session_state.creek_depth + d_step)), 2)
 
-# Creek Flow: Range 4.75 to 5.10 CFS, increments of .02 CFS
 f_step = np.random.choice([-0.02, 0.0, 0.02])
 st.session_state.creek_flow = round(max(4.75, min(5.10, st.session_state.creek_flow + f_step)), 2)
 
 # ─────────────────────────────────────────────
-#  UTILITIES & FETCHING
+#  SOIL & WEATHER UTILITIES
 # ─────────────────────────────────────────────
 
+def estimate_soil_moisture(rain_30d, today_rain=0.0):
+    """Historical method: Uses field capacity and wilting points based on regional soil maps."""
+    FIELD_CAPACITY, WILTING_POINT, MAX_STORAGE = 2.16, 1.80, 2.66
+    storage = FIELD_CAPACITY * 0.7  # Initial baseline
+    for rain in rain_30d: 
+        storage = max(WILTING_POINT, min(MAX_STORAGE, storage + rain - 0.08)) # -0.08 for ET/drainage
+    storage = min(MAX_STORAGE, storage + today_rain)
+    pct = max(0, min(100, ((storage - WILTING_POINT) / (MAX_STORAGE - WILTING_POINT)) * 100))
+    
+    # Status Logic
+    if pct >= 90: status, color = "SATURATED", "#FF3333"
+    elif pct >= 75: status, color = "WET", "#FF8C00"
+    elif pct >= 50: status, color = "MOIST", "#FFD700"
+    elif pct >= 25: status, color = "ADEQUATE", "#00FF9C"
+    else: status, color = "DRY", "#5AC8FA"
+    
+    return round(pct, 1), status, color
+
 @st.cache_data(ttl=300)
-def fetch_ambient():
+def fetch_ambient_data():
     try:
+        # Fetch Current Data
         r = requests.get("https://api.ambientweather.net/v1/devices", 
                          params={"apiKey": AMBIENT_API_KEY, "applicationKey": AMBIENT_APP_KEY}, timeout=10)
-        last = r.json()[0].get("lastData", {})
+        devices = r.json()
+        last = devices[0].get("lastData", {})
+        mac = devices[0].get("macAddress")
+        
+        # Fetch Historical (last 30 days) for Soil model
+        # Note: Real implementation would iterate through API pages; here we simulate the array
+        hist_rain = [0.0] * 30 # Placeholder for historical rain array
+        
         return {
             "temp": last.get("tempf", 72), 
-            "rain": last.get("dailyrainin", 0.0), 
-            "hourly_rain": last.get("hourlyrainin", 0.0), 
+            "rain_today": last.get("dailyrainin", 0.0), 
+            "rain_hour": last.get("hourlyrainin", 0.0),
+            "hist_rain": hist_rain,
             "ok": True
         }
-    except: return {"temp": 72, "rain": 0.0, "hourly_rain": 0.0, "ok": False}
+    except: return {"temp": 72, "rain_today": 0.0, "rain_hour": 0.0, "hist_rain": [0.0]*30, "ok": False}
 
 def make_gauge(value, title, min_val, max_val, unit, color, steps=None):
     fig = go.Figure(go.Indicator(
         mode="gauge+number", value=value,
         number={"suffix": unit, "valueformat": ".2f", "font": {"size": 24, "color": "#FFFFFF", "family": "Rajdhani"}},
         title={"text": title, "font": {"size": 11, "color": "#7AACCC", "family": "Share Tech Mono"}},
-        gauge={
-            "axis": {"range": [min_val, max_val], "tickfont": {"size": 8}},
-            "bar": {"color": color, "thickness": 0.25},
-            "bgcolor": "rgba(0,0,0,0)",
-            "steps": steps if steps else []
-        }
+        gauge={"axis": {"range": [min_val, max_val], "tickfont": {"size": 8}},
+               "bar": {"color": color, "thickness": 0.25},
+               "bgcolor": "rgba(0,0,0,0)",
+               "steps": steps if steps else []}
     ))
     fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", margin=dict(t=35, b=5, l=15, r=15), height=175)
     return fig
@@ -96,7 +117,11 @@ def make_gauge(value, title, min_val, max_val, unit, color, steps=None):
 #  DATA PROCESSING
 # ─────────────────────────────────────────────
 current_time_est = datetime.now(EST_TZ).strftime("%m/%d/%Y %I:%M %p EST")
-ambient = fetch_ambient()
+data = fetch_ambient_data()
+
+# Calculate Soil Saturation using the old method
+soil_pct, soil_status, soil_color = estimate_soil_moisture(data["hist_rain"], data["rain_today"])
+
 creek_depth_raw = st.session_state.creek_depth
 creek_flow_cfs = st.session_state.creek_flow
 
@@ -113,29 +138,26 @@ st.markdown('<div class="panel"><div class="panel-title">🌊 Primary Hydrologic
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 
 with c1:
-    # Color Logic
     d_color = "#FF0000" if creek_depth_raw > 70 else "#FF8C00" if creek_depth_raw > 60 else "#0088FF"
-    d_steps = [
-        {'range': [0, 60], 'color': "rgba(0, 136, 255, 0.1)"},
-        {'range': [60, 70], 'color': "rgba(255, 140, 0, 0.3)"},
-        {'range': [70, 100], 'color': "rgba(255, 0, 0, 0.4)"}
-    ]
+    d_steps = [{'range': [0, 60], 'color': "rgba(0, 136, 255, 0.1)"}, 
+               {'range': [60, 70], 'color': "rgba(255, 140, 0, 0.3)"},
+               {'range': [70, 100], 'color': "rgba(255, 0, 0, 0.4)"}]
     st.plotly_chart(make_gauge(creek_depth_raw, "CREEK DEPTH", 0, 100, "\"", d_color, steps=d_steps), use_container_width=True)
 
 with c2:
     st.plotly_chart(make_gauge(creek_flow_cfs, "EST. CREEK FLOW", 0, 10, " CFS", "#00FF9C"), use_container_width=True)
 
 with c3:
-    st.plotly_chart(make_gauge(82.4, "SOIL SATURATION", 0, 100, "%", "#FF8C00"), use_container_width=True)
+    st.plotly_chart(make_gauge(soil_pct, f"SOIL: {soil_status}", 0, 100, "%", soil_color), use_container_width=True)
 
 with c4:
-    st.plotly_chart(make_gauge(ambient["hourly_rain"], "RAIN INTENSITY", 0, 4, "\"/HR", "#5AC8FA"), use_container_width=True)
+    st.plotly_chart(make_gauge(data["rain_hour"], "RAIN INTENSITY", 0, 4, "\"/HR", "#5AC8FA"), use_container_width=True)
 
 with c5:
-    st.plotly_chart(make_gauge(ambient["rain"], "RAIN TODAY", 0, 5, "\"", "#0088FF"), use_container_width=True)
+    st.plotly_chart(make_gauge(data["rain_today"], "RAIN TODAY", 0, 5, "\"", "#0088FF"), use_container_width=True)
 
 with c6:
-    st.plotly_chart(make_gauge(ambient["temp"], "TEMPERATURE", 0, 110, "°F", "#FF8C00"), use_container_width=True)
+    st.plotly_chart(make_gauge(data["temp"], "TEMPERATURE", 0, 110, "°F", "#FF8C00"), use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 # 1800px MISSION COMMAND RADAR
