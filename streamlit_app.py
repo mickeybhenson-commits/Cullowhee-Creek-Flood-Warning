@@ -819,6 +819,8 @@ with h2:
         sublabel_color= cd_color,
         subsub_text   = f'Depth: {creek_depth}"',
         src_text      = "NEMO SENSOR"
+    )
+    st.components.v1.html(depth_html, height=230, scrolling=False)
 
 with h3:
     flow_html = make_animated_gauge_html(
@@ -839,6 +841,8 @@ with h3:
         sublabel_color= cf_color,
         subsub_text   = f"Flow: {creek_flow} cfs",
         src_text      = "NEMO SENSOR"
+    )
+    st.components.v1.html(flow_html, height=230, scrolling=False)
 
 with h4:
     st.markdown(f"""
