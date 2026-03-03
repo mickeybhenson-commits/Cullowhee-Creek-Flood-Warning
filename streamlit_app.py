@@ -393,19 +393,27 @@ def srctag(text):
 
 # ─────────────────────────────────────────────
 #  DYNAMIC JITTER LOGIC (Simulation Mode)
+#  Depth : 5.50 – 6.50 inches
+#  Flow  : 4.89 – 5.35 cfs
 # ─────────────────────────────────────────────
+DEPTH_MIN, DEPTH_MID, DEPTH_MAX = 5.50, 6.00, 6.50   # inches
+FLOW_MIN,  FLOW_MID,  FLOW_MAX  = 4.89, 5.12, 5.35   # cfs
+
 if 'creek_depth' not in st.session_state:
-    st.session_state.creek_depth = 6.00
+    st.session_state.creek_depth = DEPTH_MID
 if 'creek_flow' not in st.session_state:
-    st.session_state.creek_flow = 5.00
+    st.session_state.creek_flow  = FLOW_MID
 
-d_step = np.random.choice([-0.02, 0.0, 0.02])
-st.session_state.creek_depth = round(max(5.50, min(6.50, st.session_state.creek_depth + d_step)), 2)
-f_step = np.random.choice([-0.02, 0.0, 0.02])
-st.session_state.creek_flow  = round(max(4.75, min(5.10, st.session_state.creek_flow + f_step)), 2)
+d_step = np.random.choice([-0.02, -0.01, 0.0, 0.01, 0.02])
+st.session_state.creek_depth = round(
+    max(DEPTH_MIN, min(DEPTH_MAX, st.session_state.creek_depth + d_step)), 2)
 
-creek_depth = st.session_state.creek_depth
-creek_flow  = st.session_state.creek_flow
+f_step = np.random.choice([-0.02, -0.01, 0.0, 0.01, 0.02])
+st.session_state.creek_flow  = round(
+    max(FLOW_MIN,  min(FLOW_MAX,  st.session_state.creek_flow  + f_step)), 2)
+
+creek_depth = st.session_state.creek_depth   # inches
+creek_flow  = st.session_state.creek_flow    # cfs
 
 # ─────────────────────────────────────────────
 #  FETCH ALL DATA
@@ -481,19 +489,21 @@ fl_label   = "FREEZING"  if (fl_val or 50) < 32 else "COLD" if (fl_val or 50) < 
 # Snowmelt flag: freezing or near-freezing temps add melt runoff risk
 melt_note = "❄️ Snowmelt/Ice Runoff Risk" if (fl_val or 50) < 38 else ("🌡️ Rain-on-Snow Possible" if (fl_val or 50) < 45 else "")
 
-# Creek Depth
-cd_color = "#5AC8FA" if creek_depth < 5.75 else "#00FF9C" if creek_depth < 6.15 else "#FFD700" if creek_depth < 6.35 else "#FF3333"
-cd_label  = "LOW"    if creek_depth < 5.75 else "NORMAL"  if creek_depth < 6.15 else "ELEVATED" if creek_depth < 6.35 else "FLOOD RISK"
+# Creek Depth (inches) — thresholds scaled across 5.50–6.50"
+# Low < 5.65 | Normal 5.65–6.10 | Elevated 6.10–6.35 | Flood Risk > 6.35
+cd_color = "#5AC8FA" if creek_depth < 5.65 else "#00FF9C" if creek_depth < 6.10 else "#FFD700" if creek_depth < 6.35 else "#FF3333"
+cd_label  = "LOW"    if creek_depth < 5.65 else "NORMAL"  if creek_depth < 6.10 else "ELEVATED" if creek_depth < 6.35 else "FLOOD RISK"
 
-# Creek Flow
-cf_color = "#5AC8FA" if creek_flow < 4.85 else "#00FF9C" if creek_flow < 4.97 else "#FFD700" if creek_flow < 5.05 else "#FF3333"
-cf_label  = "LOW"   if creek_flow < 4.85 else "NORMAL"   if creek_flow < 4.97 else "ELEVATED" if creek_flow < 5.05 else "HIGH"
+# Creek Flow (cfs) — thresholds scaled across 4.89–5.35 cfs
+# Low < 4.97 | Normal 4.97–5.15 | Elevated 5.15–5.26 | High > 5.26
+cf_color = "#5AC8FA" if creek_flow < 4.97 else "#00FF9C" if creek_flow < 5.15 else "#FFD700" if creek_flow < 5.26 else "#FF3333"
+cf_label  = "LOW"   if creek_flow < 4.97 else "NORMAL"   if creek_flow < 5.15 else "ELEVATED" if creek_flow < 5.26 else "HIGH"
 
 # ── Composite Flood Threat Score (0–100) ─────────────────────────────────────
 # Weights: soil saturation (30%), creek depth (25%), rain today (20%),
 #          3-day forecast (15%), 1-hr intensity (10%)
 soil_score  = soil_pct
-depth_score = max(0, min(100, (creek_depth - 5.50) / (8.0 - 5.50) * 100))
+depth_score = max(0, min(100, (creek_depth - DEPTH_MIN) / (DEPTH_MAX - DEPTH_MIN) * 100))
 rain_score  = min(100, rain_today  / 3.0  * 100)
 fcst_score  = min(100, rain_3d_fcst / 4.0 * 100)
 hr1_score   = min(100, rain_1hr    / 1.0  * 100)
@@ -609,25 +619,25 @@ with h1:
     st.markdown(srctag("WATER BALANCE MODEL"), unsafe_allow_html=True)
 
 with h2:
-    fig = make_gauge(creek_depth, "CREEK DEPTH", min_val=5.0, max_val=8.0, unit=" ft", color=cd_color,
+    fig = make_gauge(creek_depth, "CREEK DEPTH", min_val=5.50, max_val=6.50, unit='"', color=cd_color,
         thresholds=[
-            {"range":[5.0,  5.75], "color":"rgba(90,200,250,0.12)"},
-            {"range":[5.75, 6.15], "color":"rgba(0,255,156,0.12)"},
-            {"range":[6.15, 6.35], "color":"rgba(255,215,0,0.12)"},
-            {"range":[6.35, 8.0],  "color":"rgba(255,51,51,0.12)"},
+            {"range":[5.50, 5.65], "color":"rgba(90,200,250,0.12)"},
+            {"range":[5.65, 6.10], "color":"rgba(0,255,156,0.12)"},
+            {"range":[6.10, 6.35], "color":"rgba(255,215,0,0.12)"},
+            {"range":[6.35, 6.50], "color":"rgba(255,51,51,0.12)"},
         ])
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
     st.markdown(sublabel(cd_label, cd_color), unsafe_allow_html=True)
-    st.markdown(subsub(f"Depth: <b style='color:#00FFCC'>{creek_depth} ft</b>"), unsafe_allow_html=True)
+    st.markdown(subsub(f"Depth: <b style='color:#00FFCC'>{creek_depth}&quot;</b>"), unsafe_allow_html=True)
     st.markdown(srctag("NEMO / SIMULATION"), unsafe_allow_html=True)
 
 with h3:
-    fig = make_gauge(creek_flow, "CREEK FLOW RATE", min_val=4.5, max_val=6.0, unit=" cfs", color=cf_color,
+    fig = make_gauge(creek_flow, "CREEK FLOW RATE", min_val=4.89, max_val=5.35, unit=" cfs", color=cf_color,
         thresholds=[
-            {"range":[4.5,  4.85], "color":"rgba(90,200,250,0.12)"},
-            {"range":[4.85, 4.97], "color":"rgba(0,255,156,0.12)"},
-            {"range":[4.97, 5.05], "color":"rgba(255,215,0,0.12)"},
-            {"range":[5.05, 6.0],  "color":"rgba(255,51,51,0.12)"},
+            {"range":[4.89, 4.97], "color":"rgba(90,200,250,0.12)"},
+            {"range":[4.97, 5.15], "color":"rgba(0,255,156,0.12)"},
+            {"range":[5.15, 5.26], "color":"rgba(255,215,0,0.12)"},
+            {"range":[5.26, 5.35], "color":"rgba(255,51,51,0.12)"},
         ])
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
     st.markdown(sublabel(cf_label, cf_color), unsafe_allow_html=True)
@@ -648,7 +658,7 @@ with h4:
         </div>
         <span style="color:#5AC8FA;font-weight:700;">CONTRIBUTING FACTORS</span><br>
         Soil Saturation &nbsp;&nbsp;&nbsp;→ <b style="color:#00FFCC">{soil_pct}%</b> ({soil_status}) — 30% weight<br>
-        Creek Depth &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ <b style="color:#00FFCC">{creek_depth} ft</b> ({cd_label}) — 25% weight<br>
+        Creek Depth &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ <b style="color:#00FFCC">{creek_depth}&quot;</b> ({cd_label}) — 25% weight<br>
         Rain Today &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ <b style="color:#00FFCC">{rain_today}"</b> ({rain_label}) — 20% weight<br>
         3-Day Forecast &nbsp;&nbsp;→ <b style="color:#00FFCC">{rain_3d_fcst}"</b> ({fcst3d_label}) — 15% weight<br>
         1-Hr Intensity &nbsp;&nbsp;&nbsp;→ <b style="color:#00FFCC">{rain_1hr}"</b> ({rain1hr_label}) — 10% weight<br>
