@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+import pytz # Added for explicit EST timezone handling
 from streamlit_autorefresh import st_autorefresh
 
 # ─────────────────────────────────────────────
@@ -18,12 +18,13 @@ st.set_page_config(
 )
 st_autorefresh(interval=300000, key="refresh")
 
-# Site Metadata
+# Site Metadata & Timezone
 LAT, LON = 35.3079, -83.1746
 SITE = "Cullowhee Creek — Cullowhee, NC"
-BASE_FLOW_IN = 6.0  # NCCAT primary baseline [cite: 2025-10-29]
+BASE_FLOW_IN = 6.0  
+EST_TZ = pytz.timezone('US/Eastern')
 
-# Secrets (Manage via Streamlit Cloud Dashboard)
+# Secrets
 AMBIENT_API_KEY = st.secrets.get("AMBIENT_API_KEY", "9ed066cb260c42adbe8778e0afb09e747f8450a7dd20479791a18d692b722334")
 AMBIENT_APP_KEY = st.secrets.get("AMBIENT_APP_KEY", "9ed066cb260c42adbe8778e0afb09e747f8450a7dd20479791a18d692b722334")
 
@@ -44,7 +45,7 @@ html, body, .stApp { background-color: #060C14; color: #E0E8F0; font-family: 'Ra
 # ─────────────────────────────────────────────
 
 def estimate_creek_flow(current_depth_in):
-    """ Power-law rating curve calibrated for Cullowhee basin """
+    """ Power-law rating curve calibrated for Cullowhee """
     stage_ft = max(0, (current_depth_in - BASE_FLOW_IN) / 12.0)
     c_multiplier = 30.0 
     calc_flow = c_multiplier * (stage_ft ** 1.5)
@@ -79,8 +80,9 @@ def make_gauge(value, title, min_val=0, max_val=100, unit="%", color="#0088FF", 
     return fig
 
 # ─────────────────────────────────────────────
-#  PROCESSING & ALERTS
+#  PROCESSING & TIME SYNC (EST)
 # ─────────────────────────────────────────────
+current_time_est = datetime.now(EST_TZ).strftime("%m/%d/%Y %I:%M %p EST")
 ambient = fetch_ambient()
 rain_now = ambient.get("rain", 0.0)
 
@@ -89,15 +91,15 @@ creek_depth_raw = 6.0 # BASEFLOW
 creek_flow_cfs = estimate_creek_flow(creek_depth_raw)
 soil_pct, soil_status, soil_color, _ = estimate_soil_moisture([0.0]*30, rain_now)
 
-# CRISIS TRIGGER LOGIC (Set to Upper Level Thresholds) [cite: 2026-01-31]
+# CRISIS TRIGGER LOGIC [cite: 2026-01-31]
 if creek_depth_raw > 60:
     st.markdown(f'<div class="crisis-banner" style="background:rgba(255,51,51,0.2); border-color:#FF3333; color:#FF3333;">⚠️ CRITICAL: CREEK DEPTH EXCEEDS UPPER THRESHOLD ({creek_depth_raw}")</div>', unsafe_allow_html=True)
 elif creek_depth_raw == 60:
     st.markdown(f'<div class="crisis-banner" style="background:rgba(255,255,0,0.2); border-color:#FFFF00; color:#FFFF00;">📢 WARNING: CREEK AT CRITICAL LEVEL (60")</div>', unsafe_allow_html=True)
 
-st.markdown(f'<div class="site-header"><div class="site-title">NOAH | CULLOWHEE HYDROMETRIC SENTINEL</div><div style="color:#7AACCC; font-family:\'Share Tech Mono\';">{SITE} | {datetime.now().strftime("%I:%M %p")}</div></div>', unsafe_allow_html=True)
+st.markdown(f'<div class="site-header"><div class="site-title">NOAH | CULLOWHEE HYDROMETRIC SENTINEL</div><div style="color:#7AACCC; font-family:\'Share Tech Mono\';">{SITE} | {current_time_est}</div></div>', unsafe_allow_html=True)
 
-# ROW 1: FULL 5-GAUGE PRIMARY HYDROMETRICS
+# ROW 1: PRIMARY HYDROMETRICS
 st.markdown('<div class="panel"><div class="panel-title">🌊 Primary Hydrologic State</div>', unsafe_allow_html=True)
 c1, c2, c3, c4, c5 = st.columns(5)
 
@@ -112,7 +114,7 @@ with c4: st.plotly_chart(make_gauge(rain_now, "RAIN TODAY", 0, 5, "\"", "#0088FF
 with c5: st.plotly_chart(make_gauge(ambient.get("temp", 72), "TEMPERATURE", 0, 110, "°F", "#FF8C00"), use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
-# DOUBLE-SIZE MISSION COMMAND RADAR [cite: 2025-10-23]
+# 1800px COMMAND RADAR
 st.markdown('<div class="panel"><div class="panel-title">📡 Official NWS Radar Loop — Mission Command Footprint</div>', unsafe_allow_html=True)
 st.components.v1.html(
     '<iframe src="https://radar.weather.gov/ridge/standard/KGSP_loop.gif" '
@@ -121,4 +123,4 @@ st.components.v1.html(
 )
 st.markdown('</div>', unsafe_allow_html=True)
 
-st.markdown(f'<div style="text-align:center; font-family:\'Share Tech Mono\'; font-size:0.75em; color:#2A4060; margin-top:20px;">PROJECT NOAH | {SITE} | Laboratory Calibration Active</div>', unsafe_allow_html=True)
+st.markdown(f'<div style="text-align:center; font-family:\'Share Tech Mono\'; font-size:0.75em; color:#2A4060; margin-top:20px;">PROJECT NOAH | {SITE} | Baseline Calibration Active</div>', unsafe_allow_html=True)
