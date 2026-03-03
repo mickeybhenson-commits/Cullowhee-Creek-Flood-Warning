@@ -774,17 +774,6 @@ with c3:
     st.markdown(srctag("OPEN-METEO HRRR/GFS"), unsafe_allow_html=True)
 
 with c4:
-    fig = make_gauge(hum_val, "HUMIDITY", min_val=0, max_val=100, unit="%", color=hum_color,
-        thresholds=[{"range":[0,40],"color":"rgba(90,200,250,0.12)"},{"range":[40,65],"color":"rgba(0,255,156,0.12)"},
-                    {"range":[65,80],"color":"rgba(255,215,0,0.12)"},{"range":[80,100],"color":"rgba(255,140,0,0.12)"}])
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-    st.markdown(sublabel(hum_label, hum_color), unsafe_allow_html=True)
-    dp_val = calc_dewpoint_f(temp_now, hum_now)
-    dp_str = f"Dewpoint: <b style='color:#00FFCC'>{dp_val}&deg;F</b>" if dp_val else "Dewpoint: --"
-    st.markdown(subsub(dp_str), unsafe_allow_html=True)
-    st.markdown(srctag("AWN SENSOR"), unsafe_allow_html=True)
-
-with c5:
     fig = make_gauge(fl_display, "TEMPERATURE / FEELS LIKE", min_val=0, max_val=100, unit="°F", color=fl_color,
         thresholds=[{"range":[0,32],"color":"rgba(90,200,250,0.12)"},{"range":[32,50],"color":"rgba(0,255,255,0.12)"},
                     {"range":[50,80],"color":"rgba(0,255,156,0.12)"},{"range":[80,100],"color":"rgba(255,140,0,0.12)"}])
@@ -796,13 +785,7 @@ with c5:
     st.markdown(subsub(note_str), unsafe_allow_html=True)
     st.markdown(srctag("AWN + CALC"), unsafe_allow_html=True)
 
-st.markdown('</div>', unsafe_allow_html=True)
-
-# ── ROW 2: WATERSHED HYDROLOGY ──────────────────────────────────────────────
-st.markdown('<div class="panel"><div class="panel-title">🌊 Watershed Hydrology — Tuckasegee Creek Monitoring</div>', unsafe_allow_html=True)
-h1, h2, h3, h4 = st.columns([2, 2, 2, 3])
-
-with h1:
+with c5:
     fig = make_gauge(soil_pct, "SOIL MOISTURE / RUNOFF RISK", color=soil_color,
         thresholds=[{"range":[0,25],"color":"rgba(90,200,250,0.12)"},{"range":[25,50],"color":"rgba(0,255,156,0.12)"},
                     {"range":[50,75],"color":"rgba(255,215,0,0.12)"},{"range":[75,100],"color":"rgba(255,51,51,0.12)"}])
@@ -810,6 +793,12 @@ with h1:
     st.markdown(sublabel(soil_status, soil_color), unsafe_allow_html=True)
     st.markdown(subsub(f"Storage: <b style='color:#00FFCC'>{soil_storage} in</b>"), unsafe_allow_html=True)
     st.markdown(srctag("WATER BALANCE MODEL"), unsafe_allow_html=True)
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ── ROW 2: WATERSHED HYDROLOGY ──────────────────────────────────────────────
+st.markdown('<div class="panel"><div class="panel-title">🌊 Watershed Hydrology — Tuckasegee Creek Monitoring</div>', unsafe_allow_html=True)
+h2, h3, h4 = st.columns([2, 2, 3])
 
 with h2:
     depth_html = make_animated_gauge_html(
