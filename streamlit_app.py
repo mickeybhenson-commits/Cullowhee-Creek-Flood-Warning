@@ -959,159 +959,17 @@ if live_panels:
                 st.markdown('</div>', unsafe_allow_html=True)
 
 # ── RADAR ────────────────────────────────────────────────────────────────────
-st.markdown('<div class="panel"><div class="panel-title">🛰️ NWS Live Radar Loop — KGSP Greer, SC · Jackson County / Cullowhee Creek Watershed</div>', unsafe_allow_html=True)
+st.markdown('<div class="panel"><div class="panel-title">🛰️ Live Radar Loop — Cullowhee Creek Watershed · Powered by RainViewer</div>', unsafe_allow_html=True)
 st.components.v1.html("""
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: #04090F; overflow: hidden; }
-  .radar-wrap {
-    position: relative;
-    width: 100%;
-    background: #04090F;
-    border-radius: 8px;
-    overflow: hidden;
-  }
-  .radar-img {
-    display: block;
-    width: 100%;
-    height: 500px;
-    object-fit: cover;
-    object-position: center;
-    border-radius: 8px;
-    image-rendering: -webkit-optimize-contrast;
-    image-rendering: crisp-edges;
-  }
-  .radar-overlay {
-    position: absolute;
-    bottom: 10px;
-    left: 12px;
-    font-family: 'Share Tech Mono', monospace;
-    font-size: 0.72em;
-    color: rgba(122,172,204,0.85);
-    background: rgba(4,9,15,0.7);
-    padding: 4px 10px;
-    border-radius: 4px;
-    border: 1px solid rgba(0,119,255,0.2);
-    pointer-events: none;
-  }
-  .radar-link {
-    position: absolute;
-    bottom: 10px;
-    right: 12px;
-    font-family: 'Share Tech Mono', monospace;
-    font-size: 0.72em;
-    color: #0077FF;
-    background: rgba(4,9,15,0.7);
-    padding: 4px 10px;
-    border-radius: 4px;
-    border: 1px solid rgba(0,119,255,0.2);
-    text-decoration: none;
-  }
-  .radar-link:hover { color: #00FFCC; border-color: rgba(0,255,204,0.4); }
-  .radar-status {
-    position: absolute;
-    top: 10px;
-    right: 12px;
-    font-family: 'Share Tech Mono', monospace;
-    font-size: 0.68em;
-    color: #00FF9C;
-    background: rgba(4,9,15,0.75);
-    padding: 3px 10px;
-    border-radius: 4px;
-    border: 1px solid rgba(0,255,156,0.3);
-    pointer-events: none;
-  }
-  .error-box {
-    display: none;
-    width: 100%; height: 500px;
-    align-items: center; justify-content: center;
-    flex-direction: column; gap: 12px;
-    color: #7AACCC;
-    font-family: 'Share Tech Mono', monospace;
-    font-size: 0.85em;
-    border: 1px solid rgba(0,119,255,0.18);
-    border-radius: 8px;
-  }
-</style>
-</head>
-<body>
-<div class="radar-wrap" id="radarWrap">
-
-  <!-- Primary: NWS Ridge2 loop GIF — KGSP base reflectivity (N0Q), 12-frame loop -->
-  <img
-    id="radarImg"
-    class="radar-img"
-    src="https://radar.weather.gov/ridge/lite/KGSP_loop.gif"
-    alt="NWS Radar Loop KGSP"
-    onerror="tryFallback()"
-  />
-
-  <div class="radar-status" id="radarStatus">● LOOPING</div>
-
-  <div class="radar-overlay">
-    NWS RIDGE2 · KGSP GREER SC · BASE REFLECTIVITY · LOOP
-  </div>
-
-  <a class="radar-link"
-     href="https://radar.weather.gov/station/KGSP/standard"
-     target="_blank">
-    OPEN FULL VIEWER ↗
-  </a>
-
-  <div class="error-box" id="errorBox">
-    <div>⚠ RADAR IMAGE UNAVAILABLE</div>
-    <div style="font-size:0.8em;color:#3A6080;">
-      Visit
-      <a href="https://radar.weather.gov/station/KGSP/standard"
-         target="_blank" style="color:#0077FF;">
-        radar.weather.gov
-      </a>
-      for live data
-    </div>
-  </div>
-
-</div>
-
-<script>
-  // ── Bust cache every 120 s so the GIF always shows the freshest frames ──
-  const REFRESH_MS = 120000;
-  const BASE_URL   = "https://radar.weather.gov/ridge/lite/KGSP_loop.gif";
-  const FALLBACK   = "https://radar.weather.gov/ridge/lite/KGSP_0.gif";
-
-  let usedFallback = false;
-
-  function reloadRadar() {
-    const img = document.getElementById("radarImg");
-    if (!img) return;
-    img.src = (usedFallback ? FALLBACK : BASE_URL) + "?cb=" + Date.now();
-  }
-
-  function tryFallback() {
-    if (!usedFallback) {
-      usedFallback = true;
-      const img = document.getElementById("radarImg");
-      img.src = FALLBACK + "?cb=" + Date.now();
-      img.onerror = showError;
-    }
-  }
-
-  function showError() {
-    document.getElementById("radarImg").style.display    = "none";
-    document.getElementById("radarStatus").style.display = "none";
-    document.getElementById("errorBox").style.display    = "flex";
-  }
-
-  // Reload on interval — animated GIF will restart its loop automatically
-  setInterval(reloadRadar, REFRESH_MS);
-</script>
-</body>
-</html>
-""", height=530)
+<iframe
+  src="https://www.rainviewer.com/map.html?loc=35.3079,-83.1746,9&oFa=0&oC=1&oU=0&oCS=1&oF=0&oAP=1&rmt=4&c=1&o=83&lm=1&layer=radar&sm=1&sn=1&play=1&playbackSpeed=2"
+  width="100%"
+  height="500"
+  frameborder="0"
+  style="border-radius:8px;display:block;"
+  allowfullscreen>
+</iframe>
+""", height=515)
 st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown(f"""
