@@ -16,15 +16,15 @@ st.set_page_config(
     page_title="NOAH: Cullowhee Hydrologic Sentinel",
     layout="wide"
 )
-# 5-minute refresh for sub-watershed sync
+# 5-minute sync for hydrologic "lab" data
 st_autorefresh(interval=300000, key="refresh")
 
-# Site Metadata
+# Site Metadata (Unique to the Cullowhee Lab)
 LAT, LON = 35.3079, -83.1746
 SITE = "Cullowhee Creek — Cullowhee, NC"
-BASE_FLOW_IN = 6.0  # Established 6-inch baseline
+BASE_FLOW_IN = 6.0  # NCCAT specific baseline
 
-# Secrets
+# Secrets (Manage via Streamlit Cloud Dashboard)
 AMBIENT_API_KEY = st.secrets.get("AMBIENT_API_KEY", "9ed066cb260c42adbe8778e0afb09e747f8450a7dd20479791a18d692b722334")
 AMBIENT_APP_KEY = st.secrets.get("AMBIENT_APP_KEY", "9ed066cb260c42adbe8778e0afb09e747f8450a7dd20479791a18d692b722334")
 
@@ -42,19 +42,21 @@ html, body, .stApp { background-color: #060C14; color: #E0E8F0; font-family: 'Ra
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-#  HYDROLOGIC LOGIC
+#  HYDROLOGIC LOGIC (The "Dial-In" Engine)
 # ─────────────────────────────────────────────
 
 def estimate_creek_flow(current_depth_in):
+    """ Power-law rating curve: Update c_multiplier as you collect lab data """
     stage_ft = max(0, (current_depth_in - BASE_FLOW_IN) / 12.0)
-    c_multiplier = 30.0 
+    c_multiplier = 30.0 # DIAL THIS IN AT NCCAT
     calc_flow = c_multiplier * (stage_ft ** 1.5)
     return round(calc_flow + 5, 1)
 
 def estimate_soil_moisture(rain_30d, today_rain=0.0):
+    """ Water Balance Model: Correct storage based on NCCAT 5-stack sensors """
     FIELD_CAPACITY, WILTING_POINT, MAX_STORAGE = 2.16, 1.80, 2.66
-    storage = FIELD_CAPACITY * 0.6
-    for rain in rain_30d: storage = max(WILTING_POINT, min(MAX_STORAGE, storage + rain - 0.10))
+    storage = FIELD_CAPACITY * 0.7 
+    for rain in rain_30d: storage = max(WILTING_POINT, min(MAX_STORAGE, storage + rain - 0.08))
     storage = min(MAX_STORAGE, storage + today_rain)
     pct = max(0, min(100, ((storage - WILTING_POINT) / (MAX_STORAGE - WILTING_POINT)) * 100))
     status, color = ("SATURATED", "#FF3333") if pct >= 90 else ("WET", "#FF8C00") if pct >= 75 else ("MOIST", "#FFD700") if pct >= 50 else ("ADEQUATE", "#00FF9C") if pct >= 25 else ("DRY", "#5AC8FA")
@@ -79,17 +81,17 @@ def make_gauge(value, title, min_val=0, max_val=100, unit="%", color="#0088FF"):
     return fig
 
 # ─────────────────────────────────────────────
-#  DASHBOARD PROCESSING
+#  PROCESSING & CRISIS TRIGGERS
 # ─────────────────────────────────────────────
 ambient = fetch_ambient()
 rain_now = ambient.get("rain", 0.0)
 
-# INPUTS (Mappable to Blues Notecard)
+# INPUTS (Mappable to real sensors once lab is live)
 creek_depth_raw = 10.5 
 creek_flow_cfs = estimate_creek_flow(creek_depth_raw)
 soil_pct, soil_status, soil_color, _ = estimate_soil_moisture([0.05]*30, rain_now)
 
-# CRISIS TRIGGER
+# CRISIS TRIGGER LOGIC
 if creek_flow_cfs > 250 or soil_pct > 95:
     st.markdown(f'<div class="crisis-banner" style="background:rgba(255,51,51,0.2); border-color:#FF3333; color:#FF3333;">⚠️ CRITICAL FLOOD ALERT: SURGE DETECTED ({creek_flow_cfs} CFS)</div>', unsafe_allow_html=True)
 elif creek_flow_cfs > 120 or soil_pct > 85:
@@ -100,7 +102,7 @@ elif creek_flow_cfs > 120 or soil_pct > 85:
 # ─────────────────────────────────────────────
 st.markdown(f"""
 <div class="site-header">
-    <div class="site-title">NOAH | CULLOWHEE HYDROMETRIC SENTINEL</div>
+    <div class="site-title">NOAH | CULLOWHEE HYDROLOGIC SENTINEL</div>
     <div style="color:#7AACCC; font-family:'Share Tech Mono';">{SITE} &nbsp;|&nbsp; {datetime.now().strftime('%m/%d/%Y %I:%M %p')}</div>
 </div>
 """, unsafe_allow_html=True)
@@ -111,19 +113,13 @@ with c2: st.plotly_chart(make_gauge(soil_pct, "SOIL SATURATION", 0, 100, "%", so
 with c3: st.plotly_chart(make_gauge(rain_now, "RAIN TODAY", 0, 5, "\"", "#0088FF"), use_container_width=True)
 with c4: st.plotly_chart(make_gauge(ambient.get("temp", 72), "TEMPERATURE", 0, 110, "°F", "#FF8C00"), use_container_width=True)
 
-# ENLARGED OFFICIAL NOAA/NWS RADAR LOOP
-st.markdown('<div class="panel"><div class="panel-title">📡 Official NOAA National Weather Service Radar Loop — Jackson County</div>', unsafe_allow_html=True)
-# Using the radar.weather.gov interactive map zoomed to Jackson County
-# Centered on Cullowhee/Sylva area
+# ENLARGED NWS RADAR
+st.markdown('<div class="panel"><div class="panel-title">📡 Official NWS Radar Loop — Jackson County Sector</div>', unsafe_allow_html=True)
 st.components.v1.html(
-    '<iframe src="https://radar.weather.gov/?settings=v1_eyJhZ2VuZGEiOnsiaWQiOiJsb2NhbCIsImNlbnRlciI6Wy04My4xNzUsMzUuMzA4XSwiem9vbSI6OSwiZmlsdGVyIjpudWxsLCJsYXllciI6InJhZGFyIiwic3RhdGlvbiI6IktHU1AifSwiYmFzZSI6InN0YW5kYXJkIiwiY291bnR5IjpmYWxzZSwiY3VtbWx0dmUiOmZhbHNlLCJmYXBzIjpmYWxzZSwiZ2xvc3NhcnkiOmZhbHNlLCJoYXphcmRzIjp0cnVlLCJvdmVybGF5Ijp0cnVlLCJyYWRhciI6dHJ1ZSwic2V2ZXJlIjpmYWxzZSwidGltZW1hY2hpbmUiOmZhbHNlLCJ3ZWF0aGVyIjp0cnVlfQ%3D%3D" '
+    f'<iframe src="https://radar.weather.gov/?settings=v1_eyJhZ2VuZGEiOnsiaWQiOiJsb2NhbCIsImNlbnRlciI6Wy04My4xNzUsMzUuMzA4XSwiem9vbSI6OSwiZmlsdGVyIjpudWxsLCJsYXllciI6InJhZGFyIiwic3RhdGlvbiI6IktHU1AifSwiYmFzZSI6InN0YW5kYXJkIiwiY291bnR5IjpmYWxzZSwiY3VtbWx0dmUiOmZhbHNlLCJmYXBzIjpmYWxzZSwiZ2xvc3NhcnkiOmZhbHNlLCJoYXphcmRzIjp0cnVlLCJvdmVybGF5Ijp0cnVlLCJyYWRhciI6dHJ1ZSwic2V2ZXJlIjpmYWxzZSwidGltZW1hY2hpbmUiOmZhbHNlLCJ3ZWF0aGVyIjp0cnVlfQ%3D%3D" '
     'width="100%" height="800" frameborder="0" style="border-radius:10px;"></iframe>', 
     height=810
 )
 st.markdown('</div>', unsafe_allow_html=True)
 
-st.markdown(f"""
-<div style="text-align:center; font-family:'Share Tech Mono'; font-size:0.75em; color:#2A4060; margin-top:20px;">
-PROJECT NOAH &nbsp;|&nbsp; {SITE} &nbsp;|&nbsp; 📡 Connectivity: Blues WiFi+Cell Failover enabled
-</div>
-""", unsafe_allow_html=True)
+st.markdown(f'<div style="text-align:center; font-family:\'Share Tech Mono\'; font-size:0.75em; color:#2A4060; margin-top:20px;">PROJECT NOAH | {SITE} | Laboratory Correction Mode</div>', unsafe_allow_html=True)
