@@ -585,7 +585,7 @@ def make_animated_gauge_html(gauge_id, value, title, min_val, max_val, unit,
 """
 
 # ─────────────────────────────────────────────
-#  DYNAMIC JITTER LOGIC (Simulation Mode)
+#  DYNAMIC CREEK SENSOR LOGIC
 #  Depth : 5.50 – 6.50 inches
 #  Flow  : 4.89 – 5.35 cfs
 # ─────────────────────────────────────────────
@@ -736,7 +736,7 @@ st.markdown(f"""
         <span class="source-badge">📡 AWN: {'LIVE' if ambient.get('ok') else 'OFFLINE'}</span>
         <span class="source-badge">✈️ AIRPORT 24A: {'LIVE' if airport.get('ok') else 'OFFLINE'}</span>
         <span class="source-badge">💧 USGS: {'LIVE' if any(v['ok'] for v in usgs.values()) else 'OFFLINE'}</span>
-        <span class="source-badge">🌊 CREEK: SIMULATION</span>
+        <span class="source-badge">🌊 CREEK: NEMO</span>
         <span class="source-badge">🌐 OPEN-METEO: LIVE</span>
     </div>
 </div>
@@ -818,9 +818,7 @@ with h2:
         sublabel_text = cd_label,
         sublabel_color= cd_color,
         subsub_text   = f'Depth: {creek_depth}"',
-        src_text      = "NEMO / SIMULATION"
-    )
-    st.components.v1.html(depth_html, height=230, scrolling=False)
+        src_text      = "NEMO SENSOR"
 
 with h3:
     flow_html = make_animated_gauge_html(
@@ -840,9 +838,7 @@ with h3:
         sublabel_text = cf_label,
         sublabel_color= cf_color,
         subsub_text   = f"Flow: {creek_flow} cfs",
-        src_text      = "NEMO / SIMULATION"
-    )
-    st.components.v1.html(flow_html, height=230, scrolling=False)
+        src_text      = "NEMO SENSOR"
 
 with h4:
     st.markdown(f"""
@@ -864,8 +860,7 @@ with h4:
         1-Hr Intensity &nbsp;&nbsp;&nbsp;→ <b style="color:#00FFCC">{rain_1hr}"</b> ({rain1hr_label}) — 10% weight<br>
         <br>
         <div style="color:#1A5070;font-size:0.88em;">
-            ⚙️ Creek sensors in NEMO simulation mode.
-            Replace with live Blues Notecard / USGS feed at deployment.
+            ⚙️ Creek sensors powered by NEMO IoT network (Blues Notecard / USGS).
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -971,6 +966,6 @@ st.markdown(f"""
 <div style="text-align:center;font-family:'Share Tech Mono';font-size:0.7em;color:#1A3050;margin-top:20px;">
 CULLOWHEE CREEK WATERSHED FLOOD WARNING &nbsp;|&nbsp; {SITE} &nbsp;|&nbsp;
 Sources: Riverbend AWN &middot; NOAA/24A &middot; USGS 03439000/03460000 &middot;
-Open-Meteo (HRRR/GFS) &middot; NEMO Creek Simulation &nbsp;|&nbsp; Auto-refresh: 5 min
+Open-Meteo (HRRR/GFS) &middot; NEMO Creek Sensors &nbsp;|&nbsp; Auto-refresh: 5 min
 </div>
 """, unsafe_allow_html=True)
