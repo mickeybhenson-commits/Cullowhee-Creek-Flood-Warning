@@ -16,16 +16,16 @@ st.set_page_config(
     page_title="NOAH: Cullowhee Hydrologic Sentinel",
     layout="wide"
 )
-# Refresh every 5 minutes (300,000 ms)
+# Refresh every 5 minutes (300,000 ms) to sync with hydrologic changes
 st_autorefresh(interval=300000, key="refresh")
 
 # Site Metadata
 LAT = 35.3079
 LON = -83.1746
 SITE = "Cullowhee Creek — Cullowhee, NC"
-BASE_FLOW_IN = 6.0  # Established 6-inch baseline
+BASE_FLOW_IN = 6.0  # Your established 6-inch baseline
 
-# Secrets (To be entered in Streamlit Cloud Secrets Manager)
+# Secrets (Manage via Streamlit Cloud Dashboard)
 AMBIENT_API_KEY = st.secrets.get("AMBIENT_API_KEY", "9ed066cb260c42adbe8778e0afb09e747f8450a7dd20479791a18d692b722334")
 AMBIENT_APP_KEY = st.secrets.get("AMBIENT_APP_KEY", "9ed066cb260c42adbe8778e0afb09e747f8450a7dd20479791a18d692b722334")
 
@@ -62,6 +62,17 @@ html, body, .stApp {
     border-bottom: 1px solid rgba(0,136,255,0.2);
     padding-bottom: 8px;
 }
+.crisis-banner {
+    padding: 20px;
+    border-radius: 10px;
+    margin-bottom: 25px;
+    text-align: center;
+    font-size: 1.5em;
+    font-weight: 700;
+    border: 2px solid;
+    animation: blinker 2s linear infinite;
+}
+@keyframes blinker { 50% { opacity: 0.6; } }
 </style>
 """, unsafe_allow_html=True)
 
@@ -70,138 +81,94 @@ html, body, .stApp {
 # ─────────────────────────────────────────────
 
 def estimate_creek_flow(current_depth_in):
-    """ Estimates CFS flow based on 6-inch base flow. """
+    """ Estimates CFS flow based on power-law rating curve approximation. """
     stage_ft = max(0, (current_depth_in - BASE_FLOW_IN) / 12.0)
-    c_multiplier = 30.0  # Basin constant for Cullowhee Creek
+    c_multiplier = 30.0  # Basin constant for Cullowhee Creek cross-section
     calc_flow = c_multiplier * (stage_ft ** 1.5)
     return round(calc_flow + 5, 1)
 
-def calc_feels_like(temp_f, humidity, wind_mph):
-    if temp_f is None: return None
-    humidity, wind_mph = humidity or 0, wind_mph or 0
-    if temp_f >= 80 and humidity >= 40:
-        hi = (-42.379 + 2.04901523*temp_f + 10.14333127*humidity - 0.22475541*temp_f*humidity 
-              - 0.00683783*temp_f**2 - 0.05481717*humidity**2 + 0.00122874*temp_f**2*humidity 
-              + 0.00085282*temp_f*humidity**2 - 0.00000199*temp_f**2*humidity**2)
-        return round(hi, 1)
-    elif temp_f <= 50 and wind_mph > 3:
-        wc = 35.74 + 0.6215*temp_f - 35.75*(wind_mph**0.16) + 0.4275*temp_f*(wind_mph**0.16)
-        return round(wc, 1)
-    return round(temp_f, 1)
-
 def estimate_soil_moisture(rain_30d, today_rain=0.0):
-    """ Water Balance Model for mountain clay loam. """
+    """ Water Balance Model for mountain clay loam (Strategic Placeholder). """
     FIELD_CAPACITY, WILTING_POINT, MAX_STORAGE = 2.16, 1.80, 2.66
-    monthly_et = {1:0.04, 2:0.06, 3:0.10, 4:0.14, 5:0.17, 6:0.20, 7:0.21, 8:0.19, 9:0.14, 10:0.09, 11:0.05, 12:0.03}
-    storage, today_month = FIELD_CAPACITY * 0.6, datetime.now().month
+    storage = FIELD_CAPACITY * 0.6
     for rain in rain_30d:
-        storage = max(WILTING_POINT, min(MAX_STORAGE, storage + rain - monthly_et.get(today_month, 0.10)))
+        storage = max(WILTING_POINT, min(MAX_STORAGE, storage + rain - 0.10))
     storage = min(MAX_STORAGE, storage + today_rain)
     pct = max(0, min(100, ((storage - WILTING_POINT) / (MAX_STORAGE - WILTING_POINT)) * 100))
     status, color = ("SATURATED", "#FF3333") if pct >= 90 else ("WET", "#FF8C00") if pct >= 75 else ("MOIST", "#FFD700") if pct >= 50 else ("ADEQUATE", "#00FF9C") if pct >= 25 else ("DRY", "#5AC8FA")
     return round(pct, 1), status, color, round(storage, 2)
 
-# ─────────────────────────────────────────────
-#  DATA FETCHING
-# ─────────────────────────────────────────────
-
 @st.cache_data(ttl=300)
 def fetch_ambient():
-    """ Fetches live weather data. """
+    """ Fetches live weather data via Ambient Weather API. """
     try:
         r = requests.get("https://api.ambientweather.net/v1/devices", params={"apiKey": AMBIENT_API_KEY, "applicationKey": AMBIENT_APP_KEY}, timeout=10)
         devices = r.json()
         target = next((d for d in devices if d.get("macAddress","").replace(":","").lower() == "35c7b0accb75a84d7891d82f125001a8"), devices[0])
         last = target.get("lastData", {})
-        return {"temp": last.get("tempf"), "hum": last.get("humidity"), "wind": last.get("windspeedmph", 0), "rain": last.get("dailyrainin", 0.0), "uv": last.get("uv", 0), "ok": True}
+        return {"temp": last.get("tempf"), "hum": last.get("humidity"), "wind": last.get("windspeedmph", 0), "rain": last.get("dailyrainin", 0.0), "ok": True}
     except: return {"ok": False}
-
-# ─────────────────────────────────────────────
-#  GAUGE COMPONENTS
-# ─────────────────────────────────────────────
 
 def make_gauge(value, title, min_val=0, max_val=100, unit="%", color="#0088FF"):
     fig = go.Figure(go.Indicator(
         mode="gauge+number", value=value,
         number={"suffix": unit, "font": {"size": 26, "color": "#FFFFFF", "family": "Rajdhani"}},
         title={"text": title, "font": {"size": 11, "color": "#7AACCC", "family": "Share Tech Mono"}},
-        gauge={
-            "axis": {"range": [min_val, max_val], "tickfont": {"size": 8}},
-            "bar": {"color": color, "thickness": 0.25},
-            "bgcolor": "rgba(0,0,0,0)",
-        }
+        gauge={"axis": {"range": [min_val, max_val], "tickfont": {"size": 8}}, "bar": {"color": color, "thickness": 0.25}, "bgcolor": "rgba(0,0,0,0)"}
     ))
     fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", margin=dict(t=35, b=5, l=15, r=15), height=185)
     return fig
 
 # ─────────────────────────────────────────────
-#  DASHBOARD RENDER
+#  SENSOR INPUTS & CRISIS TRIGGERS
 # ─────────────────────────────────────────────
-
 ambient = fetch_ambient()
-temp_now = ambient.get("temp", 72)
-hum_now = ambient.get("hum", 50)
-wind_now = ambient.get("wind", 5)
 rain_now = ambient.get("rain", 0.0)
 
-# HYPOTHETICAL/DEMO INPUTS
-creek_depth_raw = 10.5  # Simulated 10.5 inch stage
+# HYPOTHETICAL INPUTS (Mappable to Blues Notecard later)
+creek_depth_raw = 10.5  # Simulated sensor stage in inches
 creek_flow_cfs = estimate_creek_flow(creek_depth_raw)
 soil_pct, soil_status, soil_color, _ = estimate_soil_moisture([0.05]*30, rain_now)
 
+# ─────────────────────────────────────────────
+#  CRISIS MODE BANNER
+# ─────────────────────────────────────────────
+if creek_flow_cfs > 250 or soil_pct > 95:
+    st.markdown(f'<div class="crisis-banner" style="background:rgba(255,51,51,0.2); border-color:#FF3333; color:#FF3333;">⚠️ CRITICAL FLOOD ALERT: SURGE DETECTED ({creek_flow_cfs} CFS)</div>', unsafe_allow_html=True)
+elif creek_flow_cfs > 120 or soil_pct > 85:
+    st.markdown(f'<div class="crisis-banner" style="background:rgba(255,140,0,0.2); border-color:#FF8C00; color:#FF8C00;">📢 HYDROLOGIC WARNING: ELEVATED DISCHARGE ({creek_flow_cfs} CFS)</div>', unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────
+#  UI RENDER
+# ─────────────────────────────────────────────
 st.markdown(f"""
 <div class="site-header">
-    <div class="site-title">NOAH | CULLOWHEE HYDROLOGIC SENTINEL</div>
+    <div class="site-title">NOAH | CULLOWHEE HYDROMETRIC SENTINEL</div>
     <div style="color:#7AACCC; font-family:'Share Tech Mono';">{SITE} &nbsp;|&nbsp; {datetime.now().strftime('%m/%d/%Y %I:%M %p')}</div>
 </div>
 """, unsafe_allow_html=True)
 
-# ROW 1: MISSION CRITICAL HYDROLOGY
+# ROW 1: PRIMARY HYDROMETRICS
 st.markdown('<div class="panel"><div class="panel-title">🌊 Primary Hydrologic State</div>', unsafe_allow_html=True)
 c1, c2, c3, c4 = st.columns(4)
-
-with c1:
-    f_color = "#00FF9C" if creek_flow_cfs < 50 else "#FFD700" if creek_flow_cfs < 150 else "#FF3333"
-    st.plotly_chart(make_gauge(creek_flow_cfs, "EST. CREEK FLOW", 0, 500, " CFS", f_color), use_container_width=True)
-    st.markdown(f"<div style='text-align:center; font-weight:700; color:{f_color};'>BASE: 6\" | CUR: {creek_depth_raw}\"</div>", unsafe_allow_html=True)
-
-with c2:
-    st.plotly_chart(make_gauge(soil_pct, "SOIL SATURATION", 0, 100, "%", soil_color), use_container_width=True)
-    st.markdown(f"<div style='text-align:center; font-weight:700; color:{soil_color};'>{soil_status}</div>", unsafe_allow_html=True)
-
-with c3:
-    st.plotly_chart(make_gauge(rain_now, "RAIN TODAY", 0, 5, "\"", "#0088FF"), use_container_width=True)
-    st.markdown(f"<div style='text-align:center; font-weight:700; color:#0088FF;'>INTENSITY: NORMAL</div>", unsafe_allow_html=True)
-
-with c4:
-    fl_val = calc_feels_like(temp_now, hum_now, wind_now)
-    st.plotly_chart(make_gauge(fl_val, "FEELS LIKE", 0, 110, "°F", "#FF8C00"), use_container_width=True)
-    st.markdown(f"<div style='text-align:center; font-weight:700; color:#FF8C00;'>ACTUAL: {temp_now}°F</div>", unsafe_allow_html=True)
-
+with c1: st.plotly_chart(make_gauge(creek_flow_cfs, "EST. CREEK FLOW", 0, 500, " CFS", ("#FF3333" if creek_flow_cfs > 150 else "#00FF9C")), use_container_width=True)
+with c2: st.plotly_chart(make_gauge(soil_pct, "SOIL SATURATION", 0, 100, "%", soil_color), use_container_width=True)
+with c3: st.plotly_chart(make_gauge(rain_now, "RAIN TODAY", 0, 5, "\"", "#0088FF"), use_container_width=True)
+with c4: st.plotly_chart(make_gauge(ambient.get("temp", 72), "TEMPERATURE", 0, 110, "°F", "#FF8C00"), use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ROW 2: ATMOSPHERIC DATA
-st.markdown('<div class="panel"><div class="panel-title">🛰️ Sub-Watershed Atmospheric Data</div>', unsafe_allow_html=True)
-a1, a2, a3, a4, a5 = st.columns(5)
-with a1: st.metric("Humidity", f"{hum_now}%")
-with a2: st.metric("Wind Speed", f"{wind_now} mph")
-with a3: st.metric("UV Index", ambient.get("uv", 0))
-with a4: st.metric("Status", "STABLE", delta="Normal")
-with a5: st.metric("Network", "BLUES WiFi", delta="NCCAT Pilot")
-st.markdown('</div>', unsafe_allow_html=True)
-
-# ROW 3: CONTINUOUS ANIMATED RADAR LOOP
-st.markdown('<div class="panel"><div class="panel-title">🛰️ Continuous Basin Radar Loop</div>', unsafe_allow_html=True)
+# ROW 2: LOOPING RADAR MAP
+st.markdown('<div class="panel"><div class="panel-title">🛰️ Continuous Basin Radar Loop — Jackson County</div>', unsafe_allow_html=True)
 st.components.v1.html(
-    '<iframe width="100%" height="450" '
-    'src="https://embed.windy.com/embed2.html?lat=35.308&lon=-83.175&zoom=10&overlay=radar&product=radar&play_video=1" '
-    'frameborder="0" style="border-radius:8px;"></iframe>', 
-    height=460
+    f'<iframe width="100%" height="500" '
+    f'src="https://embed.windy.com/embed2.html?lat={LAT}&lon={LON}&zoom=10&overlay=radar&product=radar&play_video=1" '
+    f'frameborder="0" style="border-radius:8px;"></iframe>', 
+    height=510
 )
 st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown(f"""
 <div style="text-align:center; font-family:'Share Tech Mono'; font-size:0.75em; color:#2A4060; margin-top:20px;">
-PROJECT NOAH &nbsp;|&nbsp; {SITE} &nbsp;|&nbsp; 📡 Connectivity: Blues WiFi+Cell Failover enabled
+PROJECT NOAH &nbsp;|&nbsp; {SITE} &nbsp;|&nbsp; Connectivity: Internet Data (Simulation Mode)
 </div>
 """, unsafe_allow_html=True)
