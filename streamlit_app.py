@@ -725,7 +725,7 @@ now = datetime.now(ZoneInfo("America/New_York"))
 # ─────────────────────────────────────────────
 st.markdown(f"""
 <div class="site-header">
-    <div class="site-title">🌊 CULLOWHEE CREEK WATERSHED FLOOD WARNING</div>
+    <div class="site-title">CULLOWHEE CREEK WATERSHED FLOOD WARNING</div>
     <div class="site-sub">{SITE} &nbsp;|&nbsp;
         {now.strftime('%A, %B %d, %Y  %I:%M %p')} EST
     </div>
