@@ -111,13 +111,14 @@ with c2: st.plotly_chart(make_gauge(soil_pct, "SOIL SATURATION", 0, 100, "%", so
 with c3: st.plotly_chart(make_gauge(rain_now, "RAIN TODAY", 0, 5, "\"", "#0088FF"), use_container_width=True)
 with c4: st.plotly_chart(make_gauge(ambient.get("temp", 72), "TEMPERATURE", 0, 110, "°F", "#FF8C00"), use_container_width=True)
 
-# OFFICIAL NOAA/NWS RADAR LOOP
-st.markdown('<div class="panel"><div class="panel-title">📡 Official NOAA National Weather Service Radar Loop</div>', unsafe_allow_html=True)
-# Using the NOAA/NWS Radar tile for the GSP (Greer) sector covering Jackson County
+# ENLARGED OFFICIAL NOAA/NWS RADAR LOOP
+st.markdown('<div class="panel"><div class="panel-title">📡 Official NOAA National Weather Service Radar Loop — Jackson County</div>', unsafe_allow_html=True)
+# Using the radar.weather.gov interactive map zoomed to Jackson County
+# Centered on Cullowhee/Sylva area
 st.components.v1.html(
-    '<iframe src="https://radar.weather.gov/ridge/standard/KGSP_loop.gif" '
-    'width="100%" height="600" frameborder="0" style="border-radius:10px;"></iframe>', 
-    height=610
+    '<iframe src="https://radar.weather.gov/?settings=v1_eyJhZ2VuZGEiOnsiaWQiOiJsb2NhbCIsImNlbnRlciI6Wy04My4xNzUsMzUuMzA4XSwiem9vbSI6OSwiZmlsdGVyIjpudWxsLCJsYXllciI6InJhZGFyIiwic3RhdGlvbiI6IktHU1AifSwiYmFzZSI6InN0YW5kYXJkIiwiY291bnR5IjpmYWxzZSwiY3VtbWx0dmUiOmZhbHNlLCJmYXBzIjpmYWxzZSwiZ2xvc3NhcnkiOmZhbHNlLCJoYXphcmRzIjp0cnVlLCJvdmVybGF5Ijp0cnVlLCJyYWRhciI6dHJ1ZSwic2V2ZXJlIjpmYWxzZSwidGltZW1hY2hpbmUiOmZhbHNlLCJ3ZWF0aGVyIjp0cnVlfQ%3D%3D" '
+    'width="100%" height="800" frameborder="0" style="border-radius:10px;"></iframe>', 
+    height=810
 )
 st.markdown('</div>', unsafe_allow_html=True)
 
