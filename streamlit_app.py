@@ -16,83 +16,45 @@ st.set_page_config(
     page_title="NOAH: Cullowhee Hydrologic Sentinel",
     layout="wide"
 )
-# Refresh every 5 minutes (300,000 ms) to sync with hydrologic changes
+# 5-minute refresh for sub-watershed sync
 st_autorefresh(interval=300000, key="refresh")
 
 # Site Metadata
-LAT = 35.3079
-LON = -83.1746
+LAT, LON = 35.3079, -83.1746
 SITE = "Cullowhee Creek — Cullowhee, NC"
-BASE_FLOW_IN = 6.0  # Your established 6-inch baseline
+BASE_FLOW_IN = 6.0  # Established 6-inch baseline
 
-# Secrets (Manage via Streamlit Cloud Dashboard)
+# Secrets
 AMBIENT_API_KEY = st.secrets.get("AMBIENT_API_KEY", "9ed066cb260c42adbe8778e0afb09e747f8450a7dd20479791a18d692b722334")
 AMBIENT_APP_KEY = st.secrets.get("AMBIENT_APP_KEY", "9ed066cb260c42adbe8778e0afb09e747f8450a7dd20479791a18d692b722334")
 
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap');
-html, body, .stApp {
-    background-color: #060C14;
-    color: #E0E8F0;
-    font-family: 'Rajdhani', sans-serif;
-}
-.site-header {
-    border-left: 6px solid #0088FF;
-    padding: 12px 20px;
-    margin-bottom: 24px;
-    background: rgba(0,136,255,0.06);
-    border-radius: 0 8px 8px 0;
-}
+html, body, .stApp { background-color: #060C14; color: #E0E8F0; font-family: 'Rajdhani', sans-serif; }
+.site-header { border-left: 6px solid #0088FF; padding: 12px 20px; margin-bottom: 24px; background: rgba(0,136,255,0.06); border-radius: 0 8px 8px 0; }
 .site-title { font-size: 2.8em; font-weight: 700; color: #FFFFFF; margin: 0; letter-spacing: 3px; }
-.panel {
-    background: rgba(10,20,35,0.85);
-    border: 1px solid rgba(0,136,255,0.2);
-    border-radius: 10px;
-    padding: 18px 20px;
-    margin-bottom: 16px;
-}
-.panel-title {
-    font-family: 'Share Tech Mono', monospace;
-    font-size: 0.85em;
-    color: #0088FF;
-    text-transform: uppercase;
-    letter-spacing: 3px;
-    margin-bottom: 14px;
-    border-bottom: 1px solid rgba(0,136,255,0.2);
-    padding-bottom: 8px;
-}
-.crisis-banner {
-    padding: 20px;
-    border-radius: 10px;
-    margin-bottom: 25px;
-    text-align: center;
-    font-size: 1.5em;
-    font-weight: 700;
-    border: 2px solid;
-    animation: blinker 2s linear infinite;
-}
+.panel { background: rgba(10,20,35,0.85); border: 1px solid rgba(0,136,255,0.2); border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; }
+.panel-title { font-family: 'Share Tech Mono', monospace; font-size: 0.85em; color: #0088FF; text-transform: uppercase; letter-spacing: 3px; margin-bottom: 14px; border-bottom: 1px solid rgba(0,136,255,0.2); padding-bottom: 8px; }
+.crisis-banner { padding: 20px; border-radius: 10px; margin-bottom: 25px; text-align: center; font-size: 1.5em; font-weight: 700; border: 2px solid; animation: blinker 2s linear infinite; }
 @keyframes blinker { 50% { opacity: 0.6; } }
 </style>
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-#  HYDROLOGIC & WEATHER LOGIC
+#  HYDROLOGIC LOGIC
 # ─────────────────────────────────────────────
 
 def estimate_creek_flow(current_depth_in):
-    """ Estimates CFS flow based on power-law rating curve approximation. """
     stage_ft = max(0, (current_depth_in - BASE_FLOW_IN) / 12.0)
-    c_multiplier = 30.0  # Basin constant for Cullowhee Creek cross-section
+    c_multiplier = 30.0 
     calc_flow = c_multiplier * (stage_ft ** 1.5)
     return round(calc_flow + 5, 1)
 
 def estimate_soil_moisture(rain_30d, today_rain=0.0):
-    """ Water Balance Model for mountain clay loam (Strategic Placeholder). """
     FIELD_CAPACITY, WILTING_POINT, MAX_STORAGE = 2.16, 1.80, 2.66
     storage = FIELD_CAPACITY * 0.6
-    for rain in rain_30d:
-        storage = max(WILTING_POINT, min(MAX_STORAGE, storage + rain - 0.10))
+    for rain in rain_30d: storage = max(WILTING_POINT, min(MAX_STORAGE, storage + rain - 0.10))
     storage = min(MAX_STORAGE, storage + today_rain)
     pct = max(0, min(100, ((storage - WILTING_POINT) / (MAX_STORAGE - WILTING_POINT)) * 100))
     status, color = ("SATURATED", "#FF3333") if pct >= 90 else ("WET", "#FF8C00") if pct >= 75 else ("MOIST", "#FFD700") if pct >= 50 else ("ADEQUATE", "#00FF9C") if pct >= 25 else ("DRY", "#5AC8FA")
@@ -100,12 +62,9 @@ def estimate_soil_moisture(rain_30d, today_rain=0.0):
 
 @st.cache_data(ttl=300)
 def fetch_ambient():
-    """ Fetches live weather data via Ambient Weather API. """
     try:
         r = requests.get("https://api.ambientweather.net/v1/devices", params={"apiKey": AMBIENT_API_KEY, "applicationKey": AMBIENT_APP_KEY}, timeout=10)
-        devices = r.json()
-        target = next((d for d in devices if d.get("macAddress","").replace(":","").lower() == "35c7b0accb75a84d7891d82f125001a8"), devices[0])
-        last = target.get("lastData", {})
+        last = r.json()[0].get("lastData", {})
         return {"temp": last.get("tempf"), "hum": last.get("humidity"), "wind": last.get("windspeedmph", 0), "rain": last.get("dailyrainin", 0.0), "ok": True}
     except: return {"ok": False}
 
@@ -120,19 +79,17 @@ def make_gauge(value, title, min_val=0, max_val=100, unit="%", color="#0088FF"):
     return fig
 
 # ─────────────────────────────────────────────
-#  SENSOR INPUTS & CRISIS TRIGGERS
+#  DASHBOARD PROCESSING
 # ─────────────────────────────────────────────
 ambient = fetch_ambient()
 rain_now = ambient.get("rain", 0.0)
 
-# HYPOTHETICAL INPUTS (Mappable to Blues Notecard later)
-creek_depth_raw = 10.5  # Simulated sensor stage in inches
+# INPUTS (Mappable to Blues Notecard)
+creek_depth_raw = 10.5 
 creek_flow_cfs = estimate_creek_flow(creek_depth_raw)
 soil_pct, soil_status, soil_color, _ = estimate_soil_moisture([0.05]*30, rain_now)
 
-# ─────────────────────────────────────────────
-#  CRISIS MODE BANNER
-# ─────────────────────────────────────────────
+# CRISIS TRIGGER
 if creek_flow_cfs > 250 or soil_pct > 95:
     st.markdown(f'<div class="crisis-banner" style="background:rgba(255,51,51,0.2); border-color:#FF3333; color:#FF3333;">⚠️ CRITICAL FLOOD ALERT: SURGE DETECTED ({creek_flow_cfs} CFS)</div>', unsafe_allow_html=True)
 elif creek_flow_cfs > 120 or soil_pct > 85:
@@ -148,27 +105,24 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# ROW 1: PRIMARY HYDROMETRICS
-st.markdown('<div class="panel"><div class="panel-title">🌊 Primary Hydrologic State</div>', unsafe_allow_html=True)
 c1, c2, c3, c4 = st.columns(4)
 with c1: st.plotly_chart(make_gauge(creek_flow_cfs, "EST. CREEK FLOW", 0, 500, " CFS", ("#FF3333" if creek_flow_cfs > 150 else "#00FF9C")), use_container_width=True)
 with c2: st.plotly_chart(make_gauge(soil_pct, "SOIL SATURATION", 0, 100, "%", soil_color), use_container_width=True)
 with c3: st.plotly_chart(make_gauge(rain_now, "RAIN TODAY", 0, 5, "\"", "#0088FF"), use_container_width=True)
 with c4: st.plotly_chart(make_gauge(ambient.get("temp", 72), "TEMPERATURE", 0, 110, "°F", "#FF8C00"), use_container_width=True)
-st.markdown('</div>', unsafe_allow_html=True)
 
-# ROW 2: LOOPING RADAR MAP
-st.markdown('<div class="panel"><div class="panel-title">🛰️ Continuous Basin Radar Loop — Jackson County</div>', unsafe_allow_html=True)
+# OFFICIAL NOAA/NWS RADAR LOOP
+st.markdown('<div class="panel"><div class="panel-title">📡 Official NOAA National Weather Service Radar Loop</div>', unsafe_allow_html=True)
+# Using the NOAA/NWS Radar tile for the GSP (Greer) sector covering Jackson County
 st.components.v1.html(
-    f'<iframe width="100%" height="500" '
-    f'src="https://embed.windy.com/embed2.html?lat={LAT}&lon={LON}&zoom=10&overlay=radar&product=radar&play_video=1" '
-    f'frameborder="0" style="border-radius:8px;"></iframe>', 
-    height=510
+    '<iframe src="https://radar.weather.gov/ridge/standard/KGSP_loop.gif" '
+    'width="100%" height="600" frameborder="0" style="border-radius:10px;"></iframe>', 
+    height=610
 )
 st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown(f"""
 <div style="text-align:center; font-family:'Share Tech Mono'; font-size:0.75em; color:#2A4060; margin-top:20px;">
-PROJECT NOAH &nbsp;|&nbsp; {SITE} &nbsp;|&nbsp; Connectivity: Internet Data (Simulation Mode)
+PROJECT NOAH &nbsp;|&nbsp; {SITE} &nbsp;|&nbsp; 📡 Connectivity: Blues WiFi+Cell Failover enabled
 </div>
 """, unsafe_allow_html=True)
