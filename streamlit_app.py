@@ -21,7 +21,7 @@ st_autorefresh(interval=300000, key="refresh")
 # Site Metadata
 LAT = 35.3079
 LON = -83.1746
-SITE = "NCCAT — Cullowhee, NC"
+SITE = "Cullowhee Creek — Cullowhee, NC"
 BASE_FLOW_IN = 6.0  # Your established baseline
 
 # Secrets
