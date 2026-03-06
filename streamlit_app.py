@@ -464,7 +464,7 @@ else:
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ── ROW 5: NWS WEATHER MAP ───────────────────
-st.markdown('<div class="panel"><div class="panel-title">&#x1F5FA; NWS Regional Weather Map &mdash; Southeast / Southern Appalachians</div>', unsafe_allow_html=True)
+st.markdown('<div class="panel"><div class="panel-title">&#x1F5FA; NWS Regional Weather Map &mdash; North Carolina / Southern Appalachians</div>', unsafe_allow_html=True)
 try:
     st.components.v1.html(
         '<iframe src="https://forecast.weather.gov/wwamap/png/US.png" '
