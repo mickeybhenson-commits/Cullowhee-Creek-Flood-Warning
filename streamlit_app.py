@@ -416,6 +416,7 @@ elif forecast:
                 + '<div style="font-size:0.75em; color:#5A7090; margin-bottom:4px;">' + ddate + '</div>'
                 + '<div style="font-size:1.6em; line-height:1.2;">' + icon + '</div>'
                 + '<div style="color:' + color + '; font-size:1.55em; font-weight:700; margin:5px 0;">' + risk_str + '%</div>'
+                + '<div style="color:' + color + '; font-family:\'Share Tech Mono\',monospace; font-size:0.72em; letter-spacing:2px; margin-bottom:4px;">FLOOD RISK</div>'
                 + '<div style="color:#00FFCC; font-family:\'Share Tech Mono\',monospace; font-size:0.85em;">' + qpf_str + '&quot;</div>'
                 + '<div style="color:#7AACCC; font-size:0.75em;">' + pop_str + '% PoP</div>'
                 + '<div style="color:#7AACCC; font-size:0.75em;">' + temp_str + ' F</div>'
