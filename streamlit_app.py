@@ -144,19 +144,11 @@ def get_soil_model(total_30d):
 
 
 def compute_flood_threat(soil_sat, qpf_24h, pop_24h, usgs_stage=None):
-    """
-    Weighted composite 0–100:
-      35% soil saturation
-      30% 24-hour QPF (2.5" = max)
-      25% probability of precipitation
-      10% USGS Tuckasegee stage vs. flood stage
-    """
     soil_score  = soil_sat * 0.35
     qpf_score   = min(100, qpf_24h * 40) * 0.30
     pop_score   = pop_24h * 0.25
     usgs_score  = 0.0
     if usgs_stage:
-        # Action stage 6 ft, flood stage 8 ft → normalised 0-100
         usgs_score = min(100, max(0, (usgs_stage - 3) / 5 * 100)) * 0.10
     return round(min(100, soil_score + qpf_score + pop_score + usgs_score), 1)
 
@@ -248,12 +240,10 @@ def make_animated_gauge_html(gid, v, t, min_v, max_v, u, thresh, nclr, slbl, scl
         ctx.moveTo(cx, cy);
         ctx.lineTo(cx + r * Math.cos(ang), cy + r * Math.sin(ang));
         ctx.stroke();
-        // Centre dot
         ctx.beginPath();
         ctx.arc(cx, cy, 6, 0, 2 * Math.PI);
         ctx.fillStyle = '{nclr}';
         ctx.fill();
-        // Value label
         ctx.fillStyle   = 'white';
         ctx.font        = 'bold 20px Rajdhani';
         ctx.textAlign   = 'center';
@@ -275,20 +265,20 @@ def make_animated_gauge_html(gid, v, t, min_v, max_v, u, thresh, nclr, slbl, scl
 #  5. DATA EXECUTION
 # ─────────────────────────────────────────────
 
-noaa               = fetch_noaa_metrics()
+noaa                    = fetch_noaa_metrics()
 forecast, fc_ok, fc_err = fetch_open_meteo_forecast()
-rain_30d, prcp_ok  = fetch_30d_precip()
-usgs               = fetch_usgs_tuck()
+rain_30d, prcp_ok       = fetch_30d_precip()
+usgs                    = fetch_usgs_tuck()
 soil_in, soil_sat, soil_color = get_soil_model(rain_30d)
 
-qpf_24h    = forecast[0]["qpf"]  if forecast else 0
-pop_24h    = forecast[0]["pop"]  if forecast else 0
+qpf_24h    = forecast[0]["qpf"] if forecast else 0
+pop_24h    = forecast[0]["pop"] if forecast else 0
 usgs_stage = usgs.get("stage_ft") if usgs["ok"] else None
 
-threat_score      = compute_flood_threat(soil_sat, qpf_24h, pop_24h, usgs_stage)
+threat_score            = compute_flood_threat(soil_sat, qpf_24h, pop_24h, usgs_stage)
 t_label, t_color, t_bg = threat_meta(threat_score)
 
-# Demo animated creek state
+# Cullowhee Creek animated state
 if "depth" not in st.session_state: st.session_state.depth = 0.87
 if "flow"  not in st.session_state: st.session_state.flow  = 22.4
 st.session_state.depth = round(max(0.50, min(1.25, st.session_state.depth + np.random.uniform(-0.015, 0.015))), 2)
@@ -311,32 +301,25 @@ st.markdown(f"""
 </div>""", unsafe_allow_html=True)
 
 # ── FLOOD THREAT BANNER ─────────────────────
-score_bar_pct = threat_score  # 0-100 → width %
 st.markdown(f"""
 <div style="background:{t_bg}; border:2px solid {t_color}; border-radius:10px;
             padding:22px 30px; margin-bottom:16px; text-align:center;">
-
   <div style="font-family:'Share Tech Mono',monospace; font-size:0.75em;
               color:{t_color}; letter-spacing:4px; margin-bottom:6px;">
     ⚡ COMPOSITE FLOOD THREAT SCORE
   </div>
-
   <div style="font-size:3.5em; font-weight:700; color:{t_color};
               letter-spacing:5px; line-height:1.0;">
     {t_label}
   </div>
-
   <div style="font-size:1.8em; font-weight:600; color:white; margin-top:4px;">
     {threat_score} / 100
   </div>
-
-  <!-- Score progress bar -->
   <div style="background:rgba(255,255,255,0.08); border-radius:6px;
               height:8px; margin:12px auto; max-width:500px;">
-    <div style="background:{t_color}; width:{score_bar_pct}%; height:8px;
-                border-radius:6px; transition:width 0.5s;"></div>
+    <div style="background:{t_color}; width:{threat_score}%; height:8px;
+                border-radius:6px;"></div>
   </div>
-
   <div style="font-family:'Share Tech Mono',monospace; font-size:0.72em;
               color:#7AACCC; margin-top:6px;">
     SOIL SAT {soil_sat}%
@@ -344,80 +327,62 @@ st.markdown(f"""
     &nbsp;·&nbsp; PoP {pop_24h}%
     &nbsp;·&nbsp; TUCK STAGE {f"{usgs_stage} ft" if usgs_stage else "N/A"}
   </div>
-
 </div>""", unsafe_allow_html=True)
 
 # ── ROW 1: ATMOSPHERIC CONDITIONS ───────────
 st.markdown('<div class="panel"><div class="panel-title">🌧️ Atmospheric Conditions — NOAA/NWS Ground Truth</div>', unsafe_allow_html=True)
-
 if not noaa["ok"]:
     st.warning("⚠️ METAR feed unavailable (K24A) — values may be stale", icon="⚠️")
-
 c1, c2, c3, c4, c5 = st.columns(5)
-with c1: st.plotly_chart(make_dial(noaa["wind"],  "WIND SPEED",       0,   50,   " mph",  "#5AC8FA", src="K24A METAR"),          use_container_width=True)
-with c2: st.plotly_chart(make_dial(noaa["hum"],   "HUMIDITY",         0,  100,   "%",     "#0077FF", src="K24A METAR"),          use_container_width=True)
-with c3: st.plotly_chart(make_dial(noaa["temp"],  "TEMPERATURE",      0,  110,   "°F",    "#00FF9C", sub="±2°F Valley Corr.", src="K24A METAR"), use_container_width=True)
-with c4: st.plotly_chart(make_dial(noaa["press"], "PRESSURE",        28,   32,   " inHg", "#AAFF00", src="K24A METAR"),          use_container_width=True)
-with c5: st.plotly_chart(make_dial(soil_sat,      "SOIL SATURATION",  0,  100,   "%",     soil_color, sub=f'{soil_in}" Stored', src="OPEN-METEO MODEL"), use_container_width=True)
-
+with c1: st.plotly_chart(make_dial(noaa["wind"],  "WIND SPEED",      0,  50,  " mph",  "#5AC8FA", src="K24A METAR"), use_container_width=True)
+with c2: st.plotly_chart(make_dial(noaa["hum"],   "HUMIDITY",        0, 100,  "%",     "#0077FF", src="K24A METAR"), use_container_width=True)
+with c3: st.plotly_chart(make_dial(noaa["temp"],  "TEMPERATURE",     0, 110,  "°F",    "#00FF9C", sub="±2°F Valley Corr.", src="K24A METAR"), use_container_width=True)
+with c4: st.plotly_chart(make_dial(noaa["press"], "PRESSURE",       28,  32,  " inHg", "#AAFF00", src="K24A METAR"), use_container_width=True)
+with c5: st.plotly_chart(make_dial(soil_sat,      "SOIL SATURATION", 0, 100,  "%",     soil_color, sub=f'{soil_in}" Stored', src="OPEN-METEO MODEL"), use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ── ROW 2: USGS TUCKASEGEE (REAL DATA) ──────
+# ── ROW 2: USGS TUCKASEGEE ──────────────────
 st.markdown('<div class="panel"><div class="panel-title">📡 USGS Real-Time — Tuckasegee River at Cullowhee (Site 02178400)</div>', unsafe_allow_html=True)
-
 if usgs["ok"]:
     stage = usgs.get("stage_ft", 0) or 0
     flow  = usgs.get("flow_cfs",  0) or 0
     stage_color = "#FF3333" if stage > 7 else "#FFD700" if stage > 5 else "#00FF9C"
-    flow_color  = "#FF3333" if flow  > 3000 else "#FFD700" if flow > 1000 else "#00FF9C"
+    flow_color  = "#FF3333" if flow > 3000 else "#FFD700" if flow > 1000 else "#00FF9C"
     flow_max    = max(5000, flow * 1.5)
-
     u1, u2, u3 = st.columns([1, 1, 3])
     with u1:
         st.plotly_chart(make_dial(stage, "STAGE HEIGHT", 0, 15, " ft", stage_color,
                                   sub="Flood Stage: 8 ft", src="USGS 02178400"), use_container_width=True)
     with u2:
-        st.plotly_chart(make_dial(flow,  "STREAMFLOW",  0, flow_max, " cfs", flow_color,
+        st.plotly_chart(make_dial(flow, "STREAMFLOW", 0, flow_max, " cfs", flow_color,
                                   sub="Action: 1,000 cfs", src="USGS 02178400"), use_container_width=True)
     with u3:
         st.markdown(f"""
 <div style="background:rgba(0,80,160,0.10); border:1px solid #0077FF; border-radius:8px;
             padding:20px; font-family:'Share Tech Mono',monospace; height:185px;
             display:flex; flex-direction:column; justify-content:center;">
-  <div style="color:#0077FF; letter-spacing:1px; font-size:0.85em;">
-    📊 TUCKASEGEE WATERSHED STATUS
-  </div>
+  <div style="color:#0077FF; letter-spacing:1px; font-size:0.85em;">📊 TUCKASEGEE WATERSHED STATUS</div>
   <div style="font-size:1.05em; color:#7AACCC; margin-top:12px; line-height:2.0;">
     Stage: <span style="color:{stage_color}; font-weight:700;">{stage} ft</span>
     &nbsp;|&nbsp; Flow: <span style="color:{flow_color}; font-weight:700;">{flow} cfs</span><br>
     Flood Stage: <span style="color:#FFD700;">8.0 ft</span>
     &nbsp;|&nbsp; Action Stage: <span style="color:#FFD700;">6.0 ft</span><br>
-    <span style="color:#1A6060; font-size:0.85em;">
-      USGS 02178400 · Observed {usgs.get('dt','--:--')} EST
-    </span>
+    <span style="color:#1A6060; font-size:0.85em;">USGS 02178400 · Observed {usgs.get("dt","--:--")} EST</span>
   </div>
 </div>""", unsafe_allow_html=True)
 else:
     st.warning("⚠️ USGS stream gauge unavailable — verify waterservices.usgs.gov", icon="⚠️")
-
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ── ROW 3: 7-DAY FLOOD OUTLOOK ──────────────
 st.markdown('<div class="panel"><div class="panel-title">📅 7-Day Predictive Flood & Rainfall Outlook (Open-Meteo QPF — Real Data)</div>', unsafe_allow_html=True)
-
 if not fc_ok:
     st.warning(f"⚠️ Open-Meteo forecast unavailable — {fc_err}", icon="⚠️")
 elif forecast:
     pcols = st.columns(7)
     for i, d in enumerate(forecast):
         risk  = min(100, round((soil_sat * 0.35) + (d["pop"] * 0.35) + (d["qpf"] * 20), 1))
-        color = (
-            "#00FF9C" if risk < 30 else
-            "#AAFF00" if risk < 50 else
-            "#FFD700" if risk < 65 else
-            "#FF8800" if risk < 80 else
-            "#FF3333"
-        )
+        color = "#00FF9C" if risk < 30 else "#AAFF00" if risk < 50 else "#FFD700" if risk < 65 else "#FF8800" if risk < 80 else "#FF3333"
         with pcols[i]:
             st.markdown(f"""
 <div style="background:rgba(255,255,255,0.03); border-top:4px solid {color};
@@ -426,18 +391,14 @@ elif forecast:
   <div style="font-size:0.75em; color:#5A7090; margin-bottom:4px;">{d['date']}</div>
   <div style="font-size:1.6em; line-height:1.2;">{wmo_icon(d['code'])}</div>
   <div style="color:{color}; font-size:1.55em; font-weight:700; margin:5px 0;">{risk}%</div>
-  <div style="color:#00FFCC; font-family:'Share Tech Mono',monospace; font-size:0.85em;">
-    {d['qpf']}"
-  </div>
+  <div style="color:#00FFCC; font-family:'Share Tech Mono',monospace; font-size:0.85em;">{d['qpf']}"</div>
   <div style="color:#7AACCC; font-size:0.75em;">{d['pop']}% PoP</div>
   <div style="color:#7AACCC; font-size:0.75em;">{int(d['temp'])}°F</div>
 </div>""", unsafe_allow_html=True)
-
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ── ROW 4: CULLOWHEE CREEK (ANIMATED DEMO) ──
+# ── ROW 4: CULLOWHEE CREEK ───────────────────
 st.markdown('<div class="panel"><div class="panel-title">🌊 Cullowhee Creek — Local Sensor Feed</div>', unsafe_allow_html=True)
-
 h1, h2, h3 = st.columns([2, 2, 3])
 with h1:
     st.components.v1.html(make_animated_gauge_html(
@@ -449,18 +410,16 @@ with h1:
         "#00FF9C", "NORMAL", "#00FF9C",
         f'Stage: {st.session_state.depth} ft  |  Flood: 6.0 ft', "NEMO SENSOR"
     ), height=230)
-
 with h2:
     st.components.v1.html(make_animated_gauge_html(
         "g_flow", st.session_state.flow,
         "DISCHARGE", 0.0, 200.0, " cfs",
-        [{"range": [0.0,  80.0], "color": "rgba(0,255,156,0.15)"},
-         {"range": [80.0, 140.0],"color": "rgba(255,215,0,0.20)"},
-         {"range": [140.0,200.0],"color": "rgba(255,51,51,0.25)"}],
+        [{"range": [0.0,   80.0], "color": "rgba(0,255,156,0.15)"},
+         {"range": [80.0, 140.0], "color": "rgba(255,215,0,0.20)"},
+         {"range": [140.0,200.0], "color": "rgba(255,51,51,0.25)"}],
         "#5AC8FA", "LOW FLOW", "#5AC8FA",
         f"Discharge: {st.session_state.flow} cfs", "NEMO SENSOR"
     ), height=230)
-
 with h3:
     st.markdown(f"""
 <div style="background:rgba(0,80,160,0.10); border:1px solid #0077FF; border-radius:8px;
@@ -477,11 +436,10 @@ with h3:
     ET Extraction (Mar): 1.80"<br>
     <b>Infiltration: {soil_sat}% Capacity</b><br>
     <span style="color:#1A5070;">
-      SRC: OPEN-METEO ERA5 · {'LIVE' if prcp_ok else 'CACHED FALLBACK'}
+      SRC: OPEN-METEO ERA5 · {"LIVE" if prcp_ok else "CACHED FALLBACK"}
     </span>
   </div>
 </div>""", unsafe_allow_html=True)
-
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ── ROW 5: LIVE RADAR ───────────────────────
