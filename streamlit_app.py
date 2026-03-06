@@ -38,59 +38,44 @@ html, body, .stApp { background-color: #04090F; color: #E0E8F0; font-family: 'Ra
 # ─────────────────────────────────────────────
 
 @st.cache_data(ttl=300)
-def fetch_noaa_metrics():
+def fetch_openmeteo_current():
+    """Real-time conditions from Open-Meteo for exact Cullowhee lat/lon — no API key required."""
     try:
-        r   = requests.get("https://aviationweather.gov/api/data/metar",
-                           params={"ids": "K24A", "format": "json"}, timeout=10).json()
-        obs = r[0]
-        return {
-            "temp":  round(((obs.get("temp", 0) * 9 / 5) + 32) - 2, 2),
-            "hum":   float(obs.get("rhum", 50)),
-            "wind":  round(obs.get("wspd", 0) * 1.15, 2),
-            "press": round(obs.get("altim", 29.92), 2),
-            "ok":    True,
-        }
-    except:
-        return {"temp": 50.00, "hum": 50.00, "wind": 0.00, "press": 29.92, "ok": False}
-
-
-AWN_API_KEY = "daa4fbbae2124b72834c2c9d80a0356a43b25c684205430eafe56625c46dbc9d"
-AWN_APP_KEY = "87e44c0fe99d469f9a1d330747a231bc285a221db3f14779af518678015fe8e0"
-AWN_MAC     = "35c7b0accb75a84d7891d82f125001a8"  # from dashboard URL
-
-@st.cache_data(ttl=60)
-def fetch_awn_data():
-    """Fetch latest data from Ambient Weather Network — subscribed station."""
-    try:
-        data = requests.get(
-            f"https://api.ambientweather.net/v1/devices/{AWN_MAC}",
-            params={"apiKey": AWN_API_KEY, "applicationKey": AWN_APP_KEY,
-                    "limit": 1},
+        r = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude":             LAT,
+                "longitude":            LON,
+                "current":              "temperature_2m,relative_humidity_2m,wind_speed_10m,"
+                                        "wind_direction_10m,surface_pressure,precipitation,"
+                                        "weather_code,wind_gusts_10m",
+                "temperature_unit":     "fahrenheit",
+                "wind_speed_unit":      "mph",
+                "precipitation_unit":   "inch",
+                "forecast_days":        1,
+            },
             timeout=10
         ).json()
-
-        if not data or not isinstance(data, list):
-            return {"ok": False, "err": f"No data returned for MAC {AWN_MAC}"}
-
-        obs = data[0]
+        c = r["current"]
+        # Convert surface pressure hPa -> inHg
+        press_inhg = round(c.get("surface_pressure", 1013.25) * 0.02953, 2)
         return {
-            "ok":        True,
-            "label":     "AWN STATION",
-            "mac":       AWN_MAC,
-            "temp":      round(float(obs.get("tempf",    obs.get("temp", 50))), 2),
-            "hum":       round(float(obs.get("humidity", 50)), 2),
-            "wind":      round(float(obs.get("windspeedmph", 0)), 2),
-            "wind_gust": round(float(obs.get("windgustmph",  0)), 2),
-            "wind_dir":  obs.get("winddir", 0),
-            "press":     round(float(obs.get("baromrelin", obs.get("baromabsin", 29.92))), 2),
-            "rain_1h":   round(float(obs.get("hourlyrainin",  0)), 2),
-            "rain_24h":  round(float(obs.get("dailyrainin",   0)), 2),
-            "solar":     round(float(obs.get("solarradiation", 0)), 2),
-            "uv":        obs.get("uv", 0),
-            "ts":        obs.get("dateutc", ""),
+            "ok":       True,
+            "temp":     round(float(c.get("temperature_2m",        50)),  2),
+            "hum":      round(float(c.get("relative_humidity_2m",  50)),  2),
+            "wind":     round(float(c.get("wind_speed_10m",         0)),  2),
+            "wind_gust":round(float(c.get("wind_gusts_10m",         0)),  2),
+            "wind_dir": round(float(c.get("wind_direction_10m",     0)),  2),
+            "press":    press_inhg,
+            "precip":   round(float(c.get("precipitation",          0)),  2),
+            "wcode":    c.get("weather_code", 0),
         }
     except Exception as e:
-        return {"ok": False, "err": str(e)}
+        return {"ok": False, "temp": 50.00, "hum": 50.00, "wind": 0.00,
+                "wind_gust": 0.00, "wind_dir": 0.00, "press": 29.92,
+                "precip": 0.00, "wcode": 0}
+
+
 
 
 @st.cache_data(ttl=1800)
@@ -310,8 +295,7 @@ font-family:'Rajdhani',sans-serif;color:white;">
 #  5. DATA EXECUTION
 # ─────────────────────────────────────────────
 
-noaa                    = fetch_noaa_metrics()
-awn                     = fetch_awn_data()
+noaa                    = fetch_openmeteo_current()
 forecast, fc_ok, fc_err = fetch_nws_forecast()
 rain_30d, prcp_ok       = fetch_30d_precip()
 usgs                    = fetch_usgs_tuck()
@@ -378,32 +362,15 @@ st.markdown(f"""
 </div>""", unsafe_allow_html=True)
 
 # ROW 1: ATMOSPHERIC CONDITIONS
-atm_src  = awn["label"] if awn["ok"] else "K24A METAR"
-atm_temp = awn["temp"]  if awn["ok"] else noaa["temp"]
-atm_hum  = awn["hum"]   if awn["ok"] else noaa["hum"]
-atm_wind = awn["wind"]  if awn["ok"] else noaa["wind"]
-atm_pres = awn["press"] if awn["ok"] else noaa["press"]
-panel_src = f"AWN: {atm_src}" if awn["ok"] else "NOAA K24A METAR FALLBACK"
-st.markdown('<div class="panel"><div class="panel-title">ATMOSPHERIC CONDITIONS &mdash; ' + panel_src + '</div>', unsafe_allow_html=True)
-if not awn["ok"] and not noaa["ok"]:
-    st.warning(f"AWN unavailable ({awn.get('err','')}) and METAR unavailable — values may be stale")
-elif not awn["ok"]:
-    st.info(f"AWN unavailable ({awn.get('err','')}) — using K24A METAR fallback")
+st.markdown('<div class="panel"><div class="panel-title">ATMOSPHERIC CONDITIONS &mdash; NOAA / NWS GROUND TRUTH</div>', unsafe_allow_html=True)
+if not noaa["ok"]:
+    st.warning("METAR feed unavailable (K24A) — values may be stale")
 c1, c2, c3, c4, c5 = st.columns(5)
-with c1: st.plotly_chart(make_dial(atm_wind, "WIND SPEED",      0,  50,  " mph",  "#5AC8FA", src=atm_src), use_container_width=True)
-with c2: st.plotly_chart(make_dial(atm_hum,  "HUMIDITY",        0, 100,  "%",     "#0077FF", src=atm_src), use_container_width=True)
-with c3: st.plotly_chart(make_dial(atm_temp, "TEMPERATURE",     0, 110,  " F",    "#00FF9C", src=atm_src), use_container_width=True)
-with c4: st.plotly_chart(make_dial(atm_pres, "PRESSURE",       28,  32,  " inHg", "#AAFF00", src=atm_src), use_container_width=True)
-with c5: st.plotly_chart(make_dial(soil_sat, "SOIL SATURATION", 0, 100,  "%",     soil_color, sub=f'{soil_in:.2f}" Stored', src="OPEN-METEO"), use_container_width=True)
-if awn["ok"]:
-    st.markdown(
-        f'<div style="font-family:\'Share Tech Mono\',monospace; font-size:0.72em; color:#1A5070; margin-top:-10px; padding: 0 4px;">'
-        f'RAIN 1h: {awn["rain_1h"]:.2f}"  &middot;  RAIN 24h: {awn["rain_24h"]:.2f}"'
-        f'  &middot;  WIND GUST: {awn["wind_gust"]:.2f} mph'
-        f'  &middot;  SOLAR: {awn["solar"]:.2f} W/m&sup2;'
-        f'  &middot;  UV INDEX: {awn["uv"]}'
-        f'</div>', unsafe_allow_html=True
-    )
+with c1: st.plotly_chart(make_dial(noaa["wind"],  "WIND SPEED",      0,  50,  " mph",  "#5AC8FA", src="K24A METAR"), use_container_width=True)
+with c2: st.plotly_chart(make_dial(noaa["hum"],   "HUMIDITY",        0, 100,  "%",     "#0077FF", src="K24A METAR"), use_container_width=True)
+with c3: st.plotly_chart(make_dial(noaa["temp"],  "TEMPERATURE",     0, 110,  " F",    "#00FF9C", sub="+/-2F Valley Corr.", src="K24A METAR"), use_container_width=True)
+with c4: st.plotly_chart(make_dial(noaa["press"], "PRESSURE",        28,  32,  " inHg", "#AAFF00", src="K24A METAR"), use_container_width=True)
+with c5: st.plotly_chart(make_dial(soil_sat,      "SOIL SATURATION", 0, 100,  "%",     soil_color, sub=f'{soil_in:.2f}" Stored', src="OPEN-METEO"), use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ROW 2: CULLOWHEE CREEK
