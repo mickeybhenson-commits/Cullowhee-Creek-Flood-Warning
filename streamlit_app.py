@@ -220,7 +220,7 @@ def make_dial(v, t, min_v, max_v, u, c, sub="", src=""):
         },
     ))
     fig.update_layout(paper_bgcolor="rgba(0,0,0,0)",
-                      margin=dict(t=65, b=5, l=15, r=15), height=195)
+                      margin=dict(t=65, b=25, l=30, r=30), height=170)
     return fig
 
 
