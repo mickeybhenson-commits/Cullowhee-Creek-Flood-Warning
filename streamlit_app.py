@@ -4,30 +4,31 @@ import json
 import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime
+from collections import defaultdict
 from streamlit_autorefresh import st_autorefresh
 
 # ─────────────────────────────────────────────
-#  1. SYSTEM CONFIGURATION & STYLING
+#  1. CONFIGURATION & STYLING
 # ─────────────────────────────────────────────
 st.set_page_config(page_title="NOAH: Cullowhee Flood Warning", layout="wide")
 st_autorefresh(interval=30000, key="refresh")
 
-LAT, LON   = 35.3079, -83.1746
-USGS_SITE  = "02178400"   # Tuckasegee River at Cullowhee — real gauge
+LAT, LON  = 35.3079, -83.1746
+USGS_SITE = "02178400"  # Tuckasegee River at Cullowhee
 
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap');
 html, body, .stApp { background-color: #04090F; color: #E0E8F0; font-family: 'Rajdhani', sans-serif; }
-.site-header  { border-left: 6px solid #0077FF; padding: 14px 22px; margin-bottom: 20px;
-                background: rgba(0,100,200,0.07); border-radius: 0 8px 8px 0; }
-.site-title   { font-size: 2.4em; font-weight: 700; color: #FFFFFF; margin: 0; letter-spacing: 2px; }
-.site-sub     { font-family: 'Share Tech Mono', monospace; font-size: 0.75em; color: #5AACD0; margin-top: 4px; }
-.panel        { background: rgba(8,16,28,0.88); border: 1px solid rgba(0,119,255,0.18);
-                border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; }
-.panel-title  { font-family: 'Share Tech Mono', monospace; font-size: 0.78em; color: #0077FF;
-                text-transform: uppercase; letter-spacing: 3px;
-                border-bottom: 1px solid rgba(0,119,255,0.18); padding-bottom: 8px; margin-bottom: 14px; }
+.site-header { border-left: 6px solid #0077FF; padding: 14px 22px; margin-bottom: 20px;
+               background: rgba(0,100,200,0.07); border-radius: 0 8px 8px 0; }
+.site-title  { font-size: 2.4em; font-weight: 700; color: #FFFFFF; margin: 0; letter-spacing: 2px; }
+.site-sub    { font-family: 'Share Tech Mono', monospace; font-size: 0.75em; color: #5AACD0; margin-top: 4px; }
+.panel       { background: rgba(8,16,28,0.88); border: 1px solid rgba(0,119,255,0.18);
+               border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; }
+.panel-title { font-family: 'Share Tech Mono', monospace; font-size: 0.78em; color: #0077FF;
+               text-transform: uppercase; letter-spacing: 3px;
+               border-bottom: 1px solid rgba(0,119,255,0.18); padding-bottom: 8px; margin-bottom: 14px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -36,103 +37,78 @@ html, body, .stApp { background-color: #04090F; color: #E0E8F0; font-family: 'Ra
 #  2. DATA ACQUISITION
 # ─────────────────────────────────────────────
 
-def _ts():
-    return datetime.now().strftime("%H:%M:%S")
-
 @st.cache_data(ttl=300)
 def fetch_noaa_metrics():
     try:
-        r = requests.get(
-            "https://aviationweather.gov/api/data/metar",
-            params={"ids": "K24A", "format": "json"}, timeout=10
-        ).json()
-        obs  = r[0]
-        temp = round(((obs.get("temp", 0) * 9 / 5) + 32) - 2, 1)   # ±2°F valley offset
+        r   = requests.get("https://aviationweather.gov/api/data/metar",
+                           params={"ids": "K24A", "format": "json"}, timeout=10).json()
+        obs = r[0]
         return {
-            "temp":  temp,
+            "temp":  round(((obs.get("temp", 0) * 9 / 5) + 32) - 2, 1),
             "hum":   obs.get("rhum", 50),
             "wind":  round(obs.get("wspd", 0) * 1.15, 1),
             "press": obs.get("altim", 29.92),
             "ok":    True,
-            "ts":    _ts(),
         }
     except:
-        return {"temp": 50.0, "hum": 50, "wind": 0, "press": 29.92, "ok": False, "ts": "N/A"}
+        return {"temp": 50.0, "hum": 50, "wind": 0.0, "press": 29.92, "ok": False}
 
 
 @st.cache_data(ttl=1800)
 def fetch_nws_forecast():
-    """7-day forecast from NWS gridpoint API — real QPF, PoP, temp (free, no rate limit)."""
     try:
-        hdrs = {"User-Agent": "NOAH-FloodWarning/1.0 (WCU NEMO Project)"}
-
-        # Step 1: resolve grid
-        pts  = requests.get(f"https://api.weather.gov/points/{LAT},{LON}",
-                            headers=hdrs, timeout=10).json()["properties"]
+        hdrs     = {"User-Agent": "NOAH-FloodWarning/1.0 (WCU NEMO Project)"}
+        pts      = requests.get(f"https://api.weather.gov/points/{LAT},{LON}",
+                                headers=hdrs, timeout=10).json()["properties"]
         wfo, gx, gy = pts["gridId"], pts["gridX"], pts["gridY"]
+        periods  = requests.get(pts["forecast"],
+                                headers=hdrs, timeout=10).json()["properties"]["periods"]
+        grid     = requests.get(f"https://api.weather.gov/gridpoints/{wfo}/{gx},{gy}",
+                                headers=hdrs, timeout=15).json()["properties"]
 
-        # Step 2: standard 7-day forecast (PoP + temp + description)
-        periods = requests.get(pts["forecast"],
-                               headers=hdrs, timeout=10).json()["properties"]["periods"]
-
-        # Step 3: gridpoint data for real QPF (mm → inches) and hourly temps
-        grid_props = requests.get(
-            f"https://api.weather.gov/gridpoints/{wfo}/{gx},{gy}",
-            headers=hdrs, timeout=15
-        ).json()["properties"]
-
-        # Parse QPF: values are ISO8601 duration + mm value, aggregate by date
-        from collections import defaultdict
         qpf_by_date = defaultdict(float)
-        for entry in grid_props.get("quantitativePrecipitation", {}).get("values", []):
-            vt  = entry["validTime"].split("/")[0]          # e.g. 2025-03-06T12:00:00+00:00
-            val = entry["value"] or 0                       # mm
+        for entry in grid.get("quantitativePrecipitation", {}).get("values", []):
+            vt  = entry["validTime"].split("/")[0]
+            val = entry["value"] or 0
             try:
                 d = datetime.fromisoformat(vt).strftime("%Y-%m-%d")
-                qpf_by_date[d] += val * 0.0393701           # mm → inches
+                qpf_by_date[d] += val * 0.0393701
             except:
                 pass
 
-        # Parse max temps by date from gridpoint maxTemperature (°C → °F)
         temp_by_date = {}
-        for entry in grid_props.get("maxTemperature", {}).get("values", []):
+        for entry in grid.get("maxTemperature", {}).get("values", []):
             vt  = entry["validTime"].split("/")[0]
             val = entry["value"]
             if val is not None:
                 try:
-                    d = datetime.fromisoformat(vt).strftime("%Y-%m-%d")
-                    tf = round(val * 9/5 + 32, 0)
+                    d  = datetime.fromisoformat(vt).strftime("%Y-%m-%d")
+                    tf = round(val * 9 / 5 + 32, 2)
                     if d not in temp_by_date or tf > temp_by_date[d]:
                         temp_by_date[d] = tf
                 except:
                     pass
 
-        # Build 7-day result from daytime periods only
-        result = []
-        seen_dates = set()
+        result, seen = [], set()
         for p in periods:
             if not p["isDaytime"]:
                 continue
             try:
                 dt   = datetime.fromisoformat(p["startTime"][:10])
                 dkey = dt.strftime("%Y-%m-%d")
-                if dkey in seen_dates or len(result) >= 7:
+                if dkey in seen or len(result) >= 7:
                     continue
-                seen_dates.add(dkey)
-                pop  = (p.get("probabilityOfPrecipitation") or {}).get("value") or 0
-                temp = temp_by_date.get(dkey, p["temperature"])
-                qpf  = round(qpf_by_date.get(dkey, 0.0), 2)
+                seen.add(dkey)
                 result.append({
                     "short_name": dt.strftime("%a").upper(),
                     "date":       dt.strftime("%m/%d"),
-                    "temp":       temp,
-                    "qpf":        qpf,
-                    "pop":        pop,
+                    "temp":       temp_by_date.get(dkey, float(p["temperature"])),
+                    "qpf":        round(qpf_by_date.get(dkey, 0.0), 2),
+                    "pop":        float((p.get("probabilityOfPrecipitation") or {}).get("value") or 0),
                     "icon_txt":   p.get("shortForecast", ""),
                 })
             except:
                 continue
-
         return result, True, None
     except Exception as e:
         return [], False, str(e)
@@ -142,25 +118,25 @@ def fetch_nws_forecast():
 def fetch_30d_precip():
     try:
         r = requests.get(
-            f"https://api.open-meteo.com/v1/forecast"
-            f"?latitude={LAT}&longitude={LON}"
-            f"&daily=precipitation_sum&past_days=30&forecast_days=0"
-            f"&precipitation_unit=inch", timeout=10
+            "https://api.open-meteo.com/v1/forecast",
+            params={"latitude": LAT, "longitude": LON,
+                    "daily": "precipitation_sum", "past_days": 30,
+                    "forecast_days": 0, "precipitation_unit": "inch"},
+            timeout=10
         ).json()
         return sum(r["daily"]["precipitation_sum"]), True
     except:
-        return 4.2, False
+        return 4.20, False
 
 
 @st.cache_data(ttl=900)
 def fetch_usgs_tuck():
-    """Real USGS instantaneous values — Tuckasegee River at Cullowhee."""
     try:
-        url = (
+        ts_list = requests.get(
             f"https://waterservices.usgs.gov/nwis/iv/"
-            f"?sites={USGS_SITE}&parameterCd=00060,00065&format=json"
-        )
-        ts_list = requests.get(url, timeout=10).json()["value"]["timeSeries"]
+            f"?sites={USGS_SITE}&parameterCd=00060,00065&format=json",
+            timeout=10
+        ).json()["value"]["timeSeries"]
         data = {"ok": True}
         for series in ts_list:
             code = series["variable"]["variableCode"][0]["value"]
@@ -168,8 +144,8 @@ def fetch_usgs_tuck():
             if vals:
                 v  = float(vals[-1]["value"])
                 dt = vals[-1]["dateTime"]
-                if   code == "00060": data["flow_cfs"]  = round(v, 1)
-                elif code == "00065": data["stage_ft"]  = round(v, 2)
+                if   code == "00060": data["flow_cfs"] = round(v, 2)
+                elif code == "00065": data["stage_ft"] = round(v, 2)
                 data["dt"] = datetime.fromisoformat(dt[:19]).strftime("%H:%M")
         return data
     except:
@@ -181,22 +157,22 @@ def fetch_usgs_tuck():
 # ─────────────────────────────────────────────
 
 def get_soil_model(total_30d):
-    MAX_CAP = 2.66      # 12" Clay Loam
-    ET_LOSS = 0.06 * 30 # March ET rate
-    stored  = max(0.5, min(MAX_CAP, total_30d - ET_LOSS))
+    MAX_CAP = 2.66
+    ET_LOSS = 0.06 * 30
+    stored  = max(0.50, min(MAX_CAP, total_30d - ET_LOSS))
     sat_pct = (stored / MAX_CAP) * 100
     color   = "#FF3333" if sat_pct > 85 else "#FFD700" if sat_pct > 60 else "#00FF9C"
-    return round(stored, 2), round(sat_pct, 1), color
+    return round(stored, 2), round(sat_pct, 2), color
 
 
 def compute_flood_threat(soil_sat, qpf_24h, pop_24h, usgs_stage=None):
-    soil_score  = soil_sat * 0.35
-    qpf_score   = min(100, qpf_24h * 40) * 0.30
-    pop_score   = pop_24h * 0.25
-    usgs_score  = 0.0
+    soil_score = soil_sat * 0.35
+    qpf_score  = min(100.0, qpf_24h * 40) * 0.30
+    pop_score  = pop_24h * 0.25
+    usgs_score = 0.0
     if usgs_stage:
-        usgs_score = min(100, max(0, (usgs_stage - 3) / 5 * 100)) * 0.10
-    return round(min(100, soil_score + qpf_score + pop_score + usgs_score), 1)
+        usgs_score = min(100.0, max(0.0, (usgs_stage - 3) / 5 * 100)) * 0.10
+    return round(min(100.0, soil_score + qpf_score + pop_score + usgs_score), 2)
 
 
 def threat_meta(score):
@@ -209,17 +185,17 @@ def threat_meta(score):
 
 def nws_icon(txt):
     t = txt.lower()
-    if any(x in t for x in ["thunder", "storm"]):   return "⛈️"
-    if any(x in t for x in ["snow", "blizzard"]):   return "❄️"
-    if any(x in t for x in ["sleet", "freezing"]):  return "🌨️"
-    if any(x in t for x in ["fog", "haze"]):        return "🌫️"
-    if "shower" in t:                               return "🌦️"
-    if any(x in t for x in ["rain", "drizzle"]):    return "🌧️"
-    if "partly cloudy" in t:                        return "⛅"
-    if "mostly cloudy" in t:                        return "🌥️"
-    if "cloudy" in t:                               return "☁️"
-    if any(x in t for x in ["sunny", "clear"]):    return "☀️"
-    return "🌡️"
+    if any(x in t for x in ["thunder", "storm"]):  return "\u26c8\ufe0f"
+    if any(x in t for x in ["snow", "blizzard"]):  return "\u2744\ufe0f"
+    if any(x in t for x in ["sleet", "freezing"]): return "\ud83c\udf28\ufe0f"
+    if any(x in t for x in ["fog", "haze"]):       return "\ud83c\udf2b\ufe0f"
+    if "shower" in t:                              return "\ud83c\udf26\ufe0f"
+    if any(x in t for x in ["rain", "drizzle"]):   return "\ud83c\udf27\ufe0f"
+    if "partly cloudy" in t:                       return "\u26c5"
+    if "mostly cloudy" in t:                       return "\ud83c\udf25\ufe0f"
+    if "cloudy" in t:                              return "\u2601\ufe0f"
+    if any(x in t for x in ["sunny", "clear"]):   return "\u2600\ufe0f"
+    return "\ud83c\udf21\ufe0f"
 
 
 # ─────────────────────────────────────────────
@@ -230,13 +206,12 @@ def make_dial(v, t, min_v, max_v, u, c, sub="", src=""):
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
         value=v,
-        number={"suffix": u, "font": {"size": 22, "color": "white"}},
+        number={"suffix": u, "font": {"size": 22, "color": "white"},
+                "valueformat": ".2f"},
         title={
-            "text": (
-                f"{t}"
-                f"<br><span style='font-size:0.78em;color:#7AACCC'>{sub}</span>"
-                f"<br><span style='font-size:0.65em;color:#1A5070'>{src}</span>"
-            ),
+            "text": (f"{t}"
+                     f"<br><span style='font-size:0.78em;color:#7AACCC'>{sub}</span>"
+                     f"<br><span style='font-size:0.65em;color:#1A5070'>{src}</span>"),
             "font": {"size": 11, "color": "#7AACCC"},
         },
         gauge={
@@ -245,11 +220,8 @@ def make_dial(v, t, min_v, max_v, u, c, sub="", src=""):
             "bgcolor": "rgba(0,0,0,0)",
         },
     ))
-    fig.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        margin=dict(t=65, b=5, l=15, r=15),
-        height=195,
-    )
+    fig.update_layout(paper_bgcolor="rgba(0,0,0,0)",
+                      margin=dict(t=65, b=5, l=15, r=15), height=195)
     return fig
 
 
@@ -257,9 +229,8 @@ def make_animated_gauge_html(gid, v, t, min_v, max_v, u, thresh, nclr, slbl, scl
     t_js = json.dumps(
         [{"r0": x["range"][0], "r1": x["range"][1], "color": x["color"]} for x in thresh]
     )
-    return f"""
-<html><body style="background:transparent;text-align:center;
-                   font-family:'Rajdhani',sans-serif;color:white;">
+    return f"""<html><body style="background:transparent;text-align:center;
+font-family:'Rajdhani',sans-serif;color:white;">
 <canvas id="{gid}" width="260" height="150"></canvas>
 <div style="color:{sclr};font-weight:700;font-size:16px;
             text-transform:uppercase;letter-spacing:2px;">{slbl}</div>
@@ -268,47 +239,33 @@ def make_animated_gauge_html(gid, v, t, min_v, max_v, u, thresh, nclr, slbl, scl
             margin-top:2px;">SRC: {src}</div>
 <script>
 (function(){{
-    const canvas = document.getElementById('{gid}');
-    const ctx    = canvas.getContext('2d');
-    const cx=130, cy=125, r=95;
-    function toA(v){{
-        return Math.PI + ((v - {min_v}) / ({max_v} - {min_v})) * Math.PI;
-    }}
+    const canvas=document.getElementById('{gid}');
+    const ctx=canvas.getContext('2d');
+    const cx=130,cy=125,r=95;
+    function toA(v){{ return Math.PI+((v-{min_v})/({max_v}-{min_v}))*Math.PI; }}
     function draw(val){{
-        ctx.clearRect(0, 0, 260, 150);
-        {t_js}.forEach(t => {{
-            ctx.beginPath();
-            ctx.strokeStyle = t.color;
-            ctx.lineWidth   = 20;
-            ctx.arc(cx, cy, r, toA(t.r0), toA(t.r1));
-            ctx.stroke();
+        ctx.clearRect(0,0,260,150);
+        {t_js}.forEach(t=>{{
+            ctx.beginPath(); ctx.strokeStyle=t.color; ctx.lineWidth=20;
+            ctx.arc(cx,cy,r,toA(t.r0),toA(t.r1)); ctx.stroke();
         }});
-        const ang = toA(Math.max({min_v}, Math.min({max_v}, val)));
-        ctx.beginPath();
-        ctx.strokeStyle = '{nclr}';
-        ctx.lineWidth   = 4;
-        ctx.moveTo(cx, cy);
-        ctx.lineTo(cx + r * Math.cos(ang), cy + r * Math.sin(ang));
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(cx, cy, 6, 0, 2 * Math.PI);
-        ctx.fillStyle = '{nclr}';
-        ctx.fill();
-        ctx.fillStyle   = 'white';
-        ctx.font        = 'bold 20px Rajdhani';
-        ctx.textAlign   = 'center';
-        ctx.fillText(val.toFixed(2) + "{u}", cx, cy - 40);
+        const ang=toA(Math.max({min_v},Math.min({max_v},val)));
+        ctx.beginPath(); ctx.strokeStyle='{nclr}'; ctx.lineWidth=4;
+        ctx.moveTo(cx,cy); ctx.lineTo(cx+r*Math.cos(ang),cy+r*Math.sin(ang)); ctx.stroke();
+        ctx.beginPath(); ctx.arc(cx,cy,6,0,2*Math.PI);
+        ctx.fillStyle='{nclr}'; ctx.fill();
+        ctx.fillStyle='white'; ctx.font='bold 20px Rajdhani';
+        ctx.textAlign='center';
+        ctx.fillText(val.toFixed(2)+"{u}",cx,cy-40);
     }}
-    let cur = {min_v};
+    let cur={min_v};
     function anim(){{
-        cur += ({v} - cur) * 0.08;
-        draw(cur);
-        if (Math.abs(cur - {v}) > 0.001) requestAnimationFrame(anim);
+        cur+=({v}-cur)*0.08; draw(cur);
+        if(Math.abs(cur-{v})>0.001) requestAnimationFrame(anim);
     }}
     anim();
 }})();
-</script>
-</body></html>"""
+</script></body></html>"""
 
 
 # ─────────────────────────────────────────────
@@ -321,8 +278,8 @@ rain_30d, prcp_ok       = fetch_30d_precip()
 usgs                    = fetch_usgs_tuck()
 soil_in, soil_sat, soil_color = get_soil_model(rain_30d)
 
-qpf_24h    = forecast[0]["qpf"] if forecast else 0
-pop_24h    = forecast[0]["pop"] if forecast else 0
+qpf_24h    = forecast[0]["qpf"] if forecast else 0.0
+pop_24h    = forecast[0]["pop"] if forecast else 0.0
 usgs_stage = usgs.get("stage_ft") if usgs["ok"] else None
 
 threat_score            = compute_flood_threat(soil_sat, qpf_24h, pop_24h, usgs_stage)
@@ -330,7 +287,7 @@ t_label, t_color, t_bg = threat_meta(threat_score)
 
 # Cullowhee Creek animated state
 if "depth" not in st.session_state: st.session_state.depth = 0.87
-if "flow"  not in st.session_state: st.session_state.flow  = 22.4
+if "flow"  not in st.session_state: st.session_state.flow  = 22.40
 st.session_state.depth = round(max(0.50, min(1.25, st.session_state.depth + np.random.uniform(-0.015, 0.015))), 2)
 st.session_state.flow  = round(max(10.0, min(40.0, st.session_state.flow  + np.random.uniform(-0.30,  0.30))),  2)
 
@@ -344,19 +301,19 @@ st.markdown(f"""
 <div class="site-header">
   <div class="site-title">NOAH: CULLOWHEE CREEK FLOOD WARNING</div>
   <div class="site-sub">
-    Cullowhee Creek Watershed — Jackson County, NC
+    Cullowhee Creek Watershed \u2014 Jackson County, NC
     &nbsp;|&nbsp;
-    {datetime.now().strftime("%A, %B %d %Y — %H:%M:%S")}
+    {datetime.now().strftime("%A, %B %d %Y \u2014 %H:%M:%S")}
   </div>
 </div>""", unsafe_allow_html=True)
 
-# ── FLOOD THREAT BANNER ─────────────────────
+# ── FLOOD THREAT BANNER ──────────────────────
 st.markdown(f"""
 <div style="background:{t_bg}; border:2px solid {t_color}; border-radius:10px;
             padding:22px 30px; margin-bottom:16px; text-align:center;">
   <div style="font-family:'Share Tech Mono',monospace; font-size:0.75em;
               color:{t_color}; letter-spacing:4px; margin-bottom:6px;">
-    ⚡ COMPOSITE FLOOD THREAT SCORE
+    \u26a1 COMPOSITE FLOOD THREAT SCORE
   </div>
   <div style="font-size:3.5em; font-weight:700; color:{t_color};
               letter-spacing:5px; line-height:1.0;">
@@ -367,55 +324,31 @@ st.markdown(f"""
   </div>
   <div style="background:rgba(255,255,255,0.08); border-radius:6px;
               height:8px; margin:12px auto; max-width:500px;">
-    <div style="background:{t_color}; width:{threat_score}%; height:8px;
-                border-radius:6px;"></div>
+    <div style="background:{t_color}; width:{threat_score}%; height:8px; border-radius:6px;"></div>
   </div>
   <div style="font-family:'Share Tech Mono',monospace; font-size:0.72em;
               color:#7AACCC; margin-top:6px;">
     SOIL SAT {soil_sat:.2f}%
-    &nbsp;·&nbsp; QPF(24h) {qpf_24h:.2f}"
-    &nbsp;·&nbsp; PoP {pop_24h:.2f}%
-    &nbsp;·&nbsp; TUCK STAGE {f"{usgs_stage:.2f} ft" if usgs_stage else "N/A"}
+    &nbsp;\u00b7&nbsp; QPF(24h) {qpf_24h:.2f}"
+    &nbsp;\u00b7&nbsp; PoP {pop_24h:.2f}%
+    &nbsp;\u00b7&nbsp; TUCK STAGE {f"{usgs_stage:.2f} ft" if usgs_stage else "N/A"}
   </div>
 </div>""", unsafe_allow_html=True)
 
 # ── ROW 1: ATMOSPHERIC CONDITIONS ───────────
-st.markdown('<div class="panel"><div class="panel-title">🌧️ Atmospheric Conditions — NOAA/NWS Ground Truth</div>', unsafe_allow_html=True)
+st.markdown('<div class="panel"><div class="panel-title">\U0001f327\ufe0f Atmospheric Conditions \u2014 NOAA/NWS Ground Truth</div>', unsafe_allow_html=True)
 if not noaa["ok"]:
-    st.warning("⚠️ METAR feed unavailable (K24A) — values may be stale", icon="⚠️")
+    st.warning("\u26a0\ufe0f METAR feed unavailable (K24A) \u2014 values may be stale", icon="\u26a0\ufe0f")
 c1, c2, c3, c4, c5 = st.columns(5)
-with c1: st.plotly_chart(make_dial(noaa["wind"],  "WIND SPEED",      0,  50,  " mph",  "#5AC8FA", src="K24A METAR"), use_container_width=True)
-with c2: st.plotly_chart(make_dial(noaa["hum"],   "HUMIDITY",        0, 100,  "%",     "#0077FF", src="K24A METAR"), use_container_width=True)
-with c3: st.plotly_chart(make_dial(noaa["temp"],  "TEMPERATURE",     0, 110,  "°F",    "#00FF9C", sub="±2°F Valley Corr.", src="K24A METAR"), use_container_width=True)
-with c4: st.plotly_chart(make_dial(noaa["press"], "PRESSURE",       28,  32,  " inHg", "#AAFF00", src="K24A METAR"), use_container_width=True)
-with c5: st.plotly_chart(make_dial(soil_sat,      "SOIL SATURATION", 0, 100,  "%",     soil_color, sub=f'{soil_in}" Stored', src="OPEN-METEO MODEL"), use_container_width=True)
-st.markdown('</div>', unsafe_allow_html=True)
-
-# ── ROW 3: 7-DAY FLOOD OUTLOOK ──────────────
-st.markdown('<div class="panel"><div class="panel-title">📅 7-Day Predictive Flood & Rainfall Outlook (NWS Gridpoint QPF — Real Data)</div>', unsafe_allow_html=True)
-if not fc_ok:
-    st.warning(f"⚠️ NWS forecast unavailable — {fc_err}", icon="⚠️")
-elif forecast:
-    pcols = st.columns(7)
-    for i, d in enumerate(forecast):
-        risk  = min(100, round((soil_sat * 0.35) + (d["pop"] * 0.35) + (d["qpf"] * 20), 1))
-        color = "#00FF9C" if risk < 30 else "#AAFF00" if risk < 50 else "#FFD700" if risk < 65 else "#FF8800" if risk < 80 else "#FF3333"
-        with pcols[i]:
-            st.markdown(f"""
-<div style="background:rgba(255,255,255,0.03); border-top:4px solid {color};
-            border-radius:8px; padding:12px 8px; text-align:center;">
-  <div style="font-weight:700; font-size:1.1em;">{d['short_name']}</div>
-  <div style="font-size:0.75em; color:#5A7090; margin-bottom:4px;">{d['date']}</div>
-  <div style="font-size:1.6em; line-height:1.2;">{nws_icon(d['icon_txt'])}</div>
-  <div style="color:{color}; font-size:1.55em; font-weight:700; margin:5px 0;">{risk:.2f}%</div>
-  <div style="color:#00FFCC; font-family:'Share Tech Mono',monospace; font-size:0.85em;">{d['qpf']:.2f}"</div>
-  <div style="color:#7AACCC; font-size:0.75em;">{d['pop']:.2f}% PoP</div>
-  <div style="color:#7AACCC; font-size:0.75em;">{d['temp']:.2f}°F</div>
-</div>""", unsafe_allow_html=True)
+with c1: st.plotly_chart(make_dial(noaa["wind"],  "WIND SPEED",       0,  50,  " mph",  "#5AC8FA", src="K24A METAR"), use_container_width=True)
+with c2: st.plotly_chart(make_dial(noaa["hum"],   "HUMIDITY",         0, 100,  "%",     "#0077FF", src="K24A METAR"), use_container_width=True)
+with c3: st.plotly_chart(make_dial(noaa["temp"],  "TEMPERATURE",      0, 110,  "\u00b0F",    "#00FF9C", sub="\u00b12\u00b0F Valley Corr.", src="K24A METAR"), use_container_width=True)
+with c4: st.plotly_chart(make_dial(noaa["press"], "PRESSURE",        28,  32,  " inHg", "#AAFF00", src="K24A METAR"), use_container_width=True)
+with c5: st.plotly_chart(make_dial(soil_sat,      "SOIL SATURATION",  0, 100,  "%",     soil_color, sub=f'{soil_in:.2f}" Stored', src="OPEN-METEO MODEL"), use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ── ROW 2: CULLOWHEE CREEK ───────────────────
-st.markdown('<div class="panel"><div class="panel-title">🌊 Cullowhee Creek — Local Sensor Feed</div>', unsafe_allow_html=True)
+st.markdown('<div class="panel"><div class="panel-title">\U0001f30a Cullowhee Creek \u2014 Local Sensor Feed</div>', unsafe_allow_html=True)
 h1, h2, h3 = st.columns([2, 2, 3])
 with h1:
     st.components.v1.html(make_animated_gauge_html(
@@ -425,7 +358,7 @@ with h1:
          {"range": [4.0, 6.0], "color": "rgba(255,215,0,0.20)"},
          {"range": [6.0, 8.0], "color": "rgba(255,51,51,0.25)"}],
         "#00FF9C", "NORMAL", "#00FF9C",
-        f'Stage: {st.session_state.depth:.2f} ft  |  Flood: 6.00 ft', "NEMO SENSOR"
+        f"Stage: {st.session_state.depth:.2f} ft  |  Flood: 6.00 ft", "NEMO SENSOR"
     ), height=230)
 with h2:
     st.components.v1.html(make_animated_gauge_html(
@@ -442,7 +375,7 @@ with h3:
 <div style="background:rgba(0,80,160,0.10); border:1px solid #0077FF; border-radius:8px;
             padding:20px; font-family:'Share Tech Mono',monospace;">
   <div style="color:#0077FF; letter-spacing:1px; font-size:0.85em;">
-    📊 SOIL MOISTURE MODEL (30-DAY ACCUMULATED)
+    \U0001f4ca SOIL MOISTURE MODEL (30-DAY ACCUMULATED)
   </div>
   <div style="font-size:1.4em; font-weight:700; color:{soil_color}; margin:10px 0;">
     {soil_in:.2f} INCHES STORED
@@ -453,21 +386,44 @@ with h3:
     ET Extraction (Mar): 1.80"<br>
     <b>Infiltration: {soil_sat:.2f}% Capacity</b><br>
     <span style="color:#1A5070;">
-      SRC: OPEN-METEO ERA5 · {"LIVE" if prcp_ok else "CACHED FALLBACK"}
+      SRC: OPEN-METEO ERA5 \u00b7 {"LIVE" if prcp_ok else "CACHED FALLBACK"}
     </span>
   </div>
+</div>""", unsafe_allow_html=True)
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ── ROW 3: 7-DAY FLOOD OUTLOOK ──────────────
+st.markdown('<div class="panel"><div class="panel-title">\U0001f4c5 7-Day Predictive Flood & Rainfall Outlook (NWS Gridpoint QPF \u2014 Real Data)</div>', unsafe_allow_html=True)
+if not fc_ok:
+    st.warning(f"\u26a0\ufe0f NWS forecast unavailable \u2014 {fc_err}", icon="\u26a0\ufe0f")
+elif forecast:
+    pcols = st.columns(7)
+    for i, d in enumerate(forecast):
+        risk  = min(100.0, round((soil_sat * 0.35) + (d["pop"] * 0.35) + (d["qpf"] * 20), 2))
+        color = "#00FF9C" if risk < 30 else "#AAFF00" if risk < 50 else "#FFD700" if risk < 65 else "#FF8800" if risk < 80 else "#FF3333"
+        with pcols[i]:
+            st.markdown(f"""
+<div style="background:rgba(255,255,255,0.03); border-top:4px solid {color};
+            border-radius:8px; padding:12px 8px; text-align:center;">
+  <div style="font-weight:700; font-size:1.1em;">{d['short_name']}</div>
+  <div style="font-size:0.75em; color:#5A7090; margin-bottom:4px;">{d['date']}</div>
+  <div style="font-size:1.6em; line-height:1.2;">{nws_icon(d['icon_txt'])}</div>
+  <div style="color:{color}; font-size:1.55em; font-weight:700; margin:5px 0;">{risk:.2f}%</div>
+  <div style="color:#00FFCC; font-family:'Share Tech Mono',monospace; font-size:0.85em;">{d['qpf']:.2f}"</div>
+  <div style="color:#7AACCC; font-size:0.75em;">{d['pop']:.2f}% PoP</div>
+  <div style="color:#7AACCC; font-size:0.75em;">{d['temp']:.2f}\u00b0F</div>
 </div>""", unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ── ROW 4: USGS TUCKASEGEE ──────────────────
-st.markdown('<div class="panel"><div class="panel-title">📡 USGS Real-Time — Tuckasegee River at Cullowhee (Site 02178400)</div>', unsafe_allow_html=True)
+st.markdown('<div class="panel"><div class="panel-title">\U0001f4e1 USGS Real-Time \u2014 Tuckasegee River at Cullowhee (Site 02178400)</div>', unsafe_allow_html=True)
 if usgs["ok"]:
-    stage = usgs.get("stage_ft", 0) or 0
-    flow  = usgs.get("flow_cfs",  0) or 0
+    stage = usgs.get("stage_ft", 0.0) or 0.0
+    flow  = usgs.get("flow_cfs",  0.0) or 0.0
     stage_color = "#FF3333" if stage > 7 else "#FFD700" if stage > 5 else "#00FF9C"
     flow_color  = "#FF3333" if flow > 3000 else "#FFD700" if flow > 1000 else "#00FF9C"
-    flow_max    = max(5000, flow * 1.5)
-    u1, u2, u3 = st.columns([1, 1, 3])
+    flow_max    = max(5000.0, flow * 1.5)
+    u1, u2, u3  = st.columns([1, 1, 3])
     with u1:
         st.plotly_chart(make_dial(stage, "STAGE HEIGHT", 0, 15, " ft", stage_color,
                                   sub="Flood Stage: 8.00 ft", src="USGS 02178400"), use_container_width=True)
@@ -479,527 +435,25 @@ if usgs["ok"]:
 <div style="background:rgba(0,80,160,0.10); border:1px solid #0077FF; border-radius:8px;
             padding:20px; font-family:'Share Tech Mono',monospace; height:185px;
             display:flex; flex-direction:column; justify-content:center;">
-  <div style="color:#0077FF; letter-spacing:1px; font-size:0.85em;">📊 TUCKASEGEE WATERSHED STATUS</div>
-  <div style="font-size:1.05em; color:#7AACCC; margin-top:12px; line-height:2.0;">
-    Stage: <span style="color:{stage_color}; font-weight:700;">{stage:.2f} ft</span>
-    &nbsp;|&nbsp; Flow: <span style="color:{flow_color}; font-weight:700;">{flow:.2f} cfs</span><br>
-    Flood Stage: <span style="color:#FFD700;">8.00 ft</span>
-    &nbsp;|&nbsp; Action Stage: <span style="color:#FFD700;">6.00 ft</span><br>
-    <span style="color:#1A6060; font-size:0.85em;">USGS 02178400 · Observed {usgs.get("dt","--:--")} EST</span>
-  </div>
-</div>""", unsafe_allow_html=True)
-else:
-    st.warning("⚠️ USGS stream gauge unavailable — verify waterservices.usgs.gov", icon="⚠️")
-st.markdown('</div>', unsafe_allow_html=True)
-
-# ── ROW 5: LIVE RADAR ───────────────────────
-st.markdown('<div class="panel"><div class="panel-title">📡 Live Regional Radar — Western NC</div>', unsafe_allow_html=True)
-try:
-    st.components.v1.html(
-        f'<iframe src="https://www.rainviewer.com/map.html?loc={LAT},{LON},9'
-        f'&oFa=0&oC=0&oU=0&oCS=1&oF=0&oAP=0&rmt=4&c=3&o=83&lm=0'
-        f'&layer=radar&sm=1&sn=1" '
-        f'width="100%" height="500" style="border-radius:10px; border:none;"></iframe>',
-        height=510,
-    )
-except Exception:
-    st.error("⚠️ Radar iframe unavailable — visit rainviewer.com directly for regional coverage.")
-st.markdown('</div>', unsafe_allow_html=True)import streamlit as st
-import requests
-import json
-import numpy as np
-import plotly.graph_objects as go
-from datetime import datetime
-from streamlit_autorefresh import st_autorefresh
-
-# ─────────────────────────────────────────────
-#  1. SYSTEM CONFIGURATION & STYLING
-# ─────────────────────────────────────────────
-st.set_page_config(page_title="NOAH: Cullowhee Flood Warning", layout="wide")
-st_autorefresh(interval=30000, key="refresh")
-
-LAT, LON   = 35.3079, -83.1746
-USGS_SITE  = "02178400"   # Tuckasegee River at Cullowhee — real gauge
-
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap');
-html, body, .stApp { background-color: #04090F; color: #E0E8F0; font-family: 'Rajdhani', sans-serif; }
-.site-header  { border-left: 6px solid #0077FF; padding: 14px 22px; margin-bottom: 20px;
-                background: rgba(0,100,200,0.07); border-radius: 0 8px 8px 0; }
-.site-title   { font-size: 2.4em; font-weight: 700; color: #FFFFFF; margin: 0; letter-spacing: 2px; }
-.site-sub     { font-family: 'Share Tech Mono', monospace; font-size: 0.75em; color: #5AACD0; margin-top: 4px; }
-.panel        { background: rgba(8,16,28,0.88); border: 1px solid rgba(0,119,255,0.18);
-                border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; }
-.panel-title  { font-family: 'Share Tech Mono', monospace; font-size: 0.78em; color: #0077FF;
-                text-transform: uppercase; letter-spacing: 3px;
-                border-bottom: 1px solid rgba(0,119,255,0.18); padding-bottom: 8px; margin-bottom: 14px; }
-</style>
-""", unsafe_allow_html=True)
-
-
-# ─────────────────────────────────────────────
-#  2. DATA ACQUISITION
-# ─────────────────────────────────────────────
-
-def _ts():
-    return datetime.now().strftime("%H:%M:%S")
-
-@st.cache_data(ttl=300)
-def fetch_noaa_metrics():
-    try:
-        r = requests.get(
-            "https://aviationweather.gov/api/data/metar",
-            params={"ids": "K24A", "format": "json"}, timeout=10
-        ).json()
-        obs  = r[0]
-        temp = round(((obs.get("temp", 0) * 9 / 5) + 32) - 2, 1)   # ±2°F valley offset
-        return {
-            "temp":  temp,
-            "hum":   obs.get("rhum", 50),
-            "wind":  round(obs.get("wspd", 0) * 1.15, 1),
-            "press": obs.get("altim", 29.92),
-            "ok":    True,
-            "ts":    _ts(),
-        }
-    except:
-        return {"temp": 50.0, "hum": 50, "wind": 0, "press": 29.92, "ok": False, "ts": "N/A"}
-
-
-@st.cache_data(ttl=1800)
-def fetch_nws_forecast():
-    """7-day forecast from NWS gridpoint API — real QPF, PoP, temp (free, no rate limit)."""
-    try:
-        hdrs = {"User-Agent": "NOAH-FloodWarning/1.0 (WCU NEMO Project)"}
-
-        # Step 1: resolve grid
-        pts  = requests.get(f"https://api.weather.gov/points/{LAT},{LON}",
-                            headers=hdrs, timeout=10).json()["properties"]
-        wfo, gx, gy = pts["gridId"], pts["gridX"], pts["gridY"]
-
-        # Step 2: standard 7-day forecast (PoP + temp + description)
-        periods = requests.get(pts["forecast"],
-                               headers=hdrs, timeout=10).json()["properties"]["periods"]
-
-        # Step 3: gridpoint data for real QPF (mm → inches) and hourly temps
-        grid_props = requests.get(
-            f"https://api.weather.gov/gridpoints/{wfo}/{gx},{gy}",
-            headers=hdrs, timeout=15
-        ).json()["properties"]
-
-        # Parse QPF: values are ISO8601 duration + mm value, aggregate by date
-        from collections import defaultdict
-        qpf_by_date = defaultdict(float)
-        for entry in grid_props.get("quantitativePrecipitation", {}).get("values", []):
-            vt  = entry["validTime"].split("/")[0]          # e.g. 2025-03-06T12:00:00+00:00
-            val = entry["value"] or 0                       # mm
-            try:
-                d = datetime.fromisoformat(vt).strftime("%Y-%m-%d")
-                qpf_by_date[d] += val * 0.0393701           # mm → inches
-            except:
-                pass
-
-        # Parse max temps by date from gridpoint maxTemperature (°C → °F)
-        temp_by_date = {}
-        for entry in grid_props.get("maxTemperature", {}).get("values", []):
-            vt  = entry["validTime"].split("/")[0]
-            val = entry["value"]
-            if val is not None:
-                try:
-                    d = datetime.fromisoformat(vt).strftime("%Y-%m-%d")
-                    tf = round(val * 9/5 + 32, 0)
-                    if d not in temp_by_date or tf > temp_by_date[d]:
-                        temp_by_date[d] = tf
-                except:
-                    pass
-
-        # Build 7-day result from daytime periods only
-        result = []
-        seen_dates = set()
-        for p in periods:
-            if not p["isDaytime"]:
-                continue
-            try:
-                dt   = datetime.fromisoformat(p["startTime"][:10])
-                dkey = dt.strftime("%Y-%m-%d")
-                if dkey in seen_dates or len(result) >= 7:
-                    continue
-                seen_dates.add(dkey)
-                pop  = (p.get("probabilityOfPrecipitation") or {}).get("value") or 0
-                temp = temp_by_date.get(dkey, p["temperature"])
-                qpf  = round(qpf_by_date.get(dkey, 0.0), 2)
-                result.append({
-                    "short_name": dt.strftime("%a").upper(),
-                    "date":       dt.strftime("%m/%d"),
-                    "temp":       temp,
-                    "qpf":        qpf,
-                    "pop":        pop,
-                    "icon_txt":   p.get("shortForecast", ""),
-                })
-            except:
-                continue
-
-        return result, True, None
-    except Exception as e:
-        return [], False, str(e)
-
-
-@st.cache_data(ttl=3600)
-def fetch_30d_precip():
-    try:
-        r = requests.get(
-            f"https://api.open-meteo.com/v1/forecast"
-            f"?latitude={LAT}&longitude={LON}"
-            f"&daily=precipitation_sum&past_days=30&forecast_days=0"
-            f"&precipitation_unit=inch", timeout=10
-        ).json()
-        return sum(r["daily"]["precipitation_sum"]), True
-    except:
-        return 4.2, False
-
-
-@st.cache_data(ttl=900)
-def fetch_usgs_tuck():
-    """Real USGS instantaneous values — Tuckasegee River at Cullowhee."""
-    try:
-        url = (
-            f"https://waterservices.usgs.gov/nwis/iv/"
-            f"?sites={USGS_SITE}&parameterCd=00060,00065&format=json"
-        )
-        ts_list = requests.get(url, timeout=10).json()["value"]["timeSeries"]
-        data = {"ok": True}
-        for series in ts_list:
-            code = series["variable"]["variableCode"][0]["value"]
-            vals = series["values"][0]["value"]
-            if vals:
-                v  = float(vals[-1]["value"])
-                dt = vals[-1]["dateTime"]
-                if   code == "00060": data["flow_cfs"]  = round(v, 1)
-                elif code == "00065": data["stage_ft"]  = round(v, 2)
-                data["dt"] = datetime.fromisoformat(dt[:19]).strftime("%H:%M")
-        return data
-    except:
-        return {"ok": False, "flow_cfs": None, "stage_ft": None, "dt": "--:--"}
-
-
-# ─────────────────────────────────────────────
-#  3. HYDRO-MODELING
-# ─────────────────────────────────────────────
-
-def get_soil_model(total_30d):
-    MAX_CAP = 2.66      # 12" Clay Loam
-    ET_LOSS = 0.06 * 30 # March ET rate
-    stored  = max(0.5, min(MAX_CAP, total_30d - ET_LOSS))
-    sat_pct = (stored / MAX_CAP) * 100
-    color   = "#FF3333" if sat_pct > 85 else "#FFD700" if sat_pct > 60 else "#00FF9C"
-    return round(stored, 2), round(sat_pct, 1), color
-
-
-def compute_flood_threat(soil_sat, qpf_24h, pop_24h, usgs_stage=None):
-    soil_score  = soil_sat * 0.35
-    qpf_score   = min(100, qpf_24h * 40) * 0.30
-    pop_score   = pop_24h * 0.25
-    usgs_score  = 0.0
-    if usgs_stage:
-        usgs_score = min(100, max(0, (usgs_stage - 3) / 5 * 100)) * 0.10
-    return round(min(100, soil_score + qpf_score + pop_score + usgs_score), 1)
-
-
-def threat_meta(score):
-    if score < 25: return "NORMAL",    "#00FF9C", "rgba(0,255,156,0.07)"
-    if score < 45: return "ELEVATED",  "#AAFF00", "rgba(170,255,0,0.07)"
-    if score < 65: return "WATCH",     "#FFD700", "rgba(255,215,0,0.09)"
-    if score < 82: return "WARNING",   "#FF8800", "rgba(255,136,0,0.11)"
-    return               "EMERGENCY",  "#FF3333", "rgba(255,51,51,0.14)"
-
-
-def nws_icon(txt):
-    t = txt.lower()
-    if any(x in t for x in ["thunder", "storm"]):   return "⛈️"
-    if any(x in t for x in ["snow", "blizzard"]):   return "❄️"
-    if any(x in t for x in ["sleet", "freezing"]):  return "🌨️"
-    if any(x in t for x in ["fog", "haze"]):        return "🌫️"
-    if "shower" in t:                               return "🌦️"
-    if any(x in t for x in ["rain", "drizzle"]):    return "🌧️"
-    if "partly cloudy" in t:                        return "⛅"
-    if "mostly cloudy" in t:                        return "🌥️"
-    if "cloudy" in t:                               return "☁️"
-    if any(x in t for x in ["sunny", "clear"]):    return "☀️"
-    return "🌡️"
-
-
-# ─────────────────────────────────────────────
-#  4. UI BUILDERS
-# ─────────────────────────────────────────────
-
-def make_dial(v, t, min_v, max_v, u, c, sub="", src=""):
-    fig = go.Figure(go.Indicator(
-        mode="gauge+number",
-        value=v,
-        number={"suffix": u, "font": {"size": 22, "color": "white"}},
-        title={
-            "text": (
-                f"{t}"
-                f"<br><span style='font-size:0.78em;color:#7AACCC'>{sub}</span>"
-                f"<br><span style='font-size:0.65em;color:#1A5070'>{src}</span>"
-            ),
-            "font": {"size": 11, "color": "#7AACCC"},
-        },
-        gauge={
-            "axis":    {"range": [min_v, max_v]},
-            "bar":     {"color": c, "thickness": 0.25},
-            "bgcolor": "rgba(0,0,0,0)",
-        },
-    ))
-    fig.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        margin=dict(t=65, b=5, l=15, r=15),
-        height=195,
-    )
-    return fig
-
-
-def make_animated_gauge_html(gid, v, t, min_v, max_v, u, thresh, nclr, slbl, sclr, sub, src):
-    t_js = json.dumps(
-        [{"r0": x["range"][0], "r1": x["range"][1], "color": x["color"]} for x in thresh]
-    )
-    return f"""
-<html><body style="background:transparent;text-align:center;
-                   font-family:'Rajdhani',sans-serif;color:white;">
-<canvas id="{gid}" width="260" height="150"></canvas>
-<div style="color:{sclr};font-weight:700;font-size:16px;
-            text-transform:uppercase;letter-spacing:2px;">{slbl}</div>
-<div style="font-size:12px;color:#7AACCC;margin-top:4px;">{sub}</div>
-<div style="font-size:9px;color:#1A5070;font-family:'Share Tech Mono',monospace;
-            margin-top:2px;">SRC: {src}</div>
-<script>
-(function(){{
-    const canvas = document.getElementById('{gid}');
-    const ctx    = canvas.getContext('2d');
-    const cx=130, cy=125, r=95;
-    function toA(v){{
-        return Math.PI + ((v - {min_v}) / ({max_v} - {min_v})) * Math.PI;
-    }}
-    function draw(val){{
-        ctx.clearRect(0, 0, 260, 150);
-        {t_js}.forEach(t => {{
-            ctx.beginPath();
-            ctx.strokeStyle = t.color;
-            ctx.lineWidth   = 20;
-            ctx.arc(cx, cy, r, toA(t.r0), toA(t.r1));
-            ctx.stroke();
-        }});
-        const ang = toA(Math.max({min_v}, Math.min({max_v}, val)));
-        ctx.beginPath();
-        ctx.strokeStyle = '{nclr}';
-        ctx.lineWidth   = 4;
-        ctx.moveTo(cx, cy);
-        ctx.lineTo(cx + r * Math.cos(ang), cy + r * Math.sin(ang));
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(cx, cy, 6, 0, 2 * Math.PI);
-        ctx.fillStyle = '{nclr}';
-        ctx.fill();
-        ctx.fillStyle   = 'white';
-        ctx.font        = 'bold 20px Rajdhani';
-        ctx.textAlign   = 'center';
-        ctx.fillText(val.toFixed(2) + "{u}", cx, cy - 40);
-    }}
-    let cur = {min_v};
-    function anim(){{
-        cur += ({v} - cur) * 0.08;
-        draw(cur);
-        if (Math.abs(cur - {v}) > 0.001) requestAnimationFrame(anim);
-    }}
-    anim();
-}})();
-</script>
-</body></html>"""
-
-
-# ─────────────────────────────────────────────
-#  5. DATA EXECUTION
-# ─────────────────────────────────────────────
-
-noaa                    = fetch_noaa_metrics()
-forecast, fc_ok, fc_err = fetch_nws_forecast()
-rain_30d, prcp_ok       = fetch_30d_precip()
-usgs                    = fetch_usgs_tuck()
-soil_in, soil_sat, soil_color = get_soil_model(rain_30d)
-
-qpf_24h    = forecast[0]["qpf"] if forecast else 0
-pop_24h    = forecast[0]["pop"] if forecast else 0
-usgs_stage = usgs.get("stage_ft") if usgs["ok"] else None
-
-threat_score            = compute_flood_threat(soil_sat, qpf_24h, pop_24h, usgs_stage)
-t_label, t_color, t_bg = threat_meta(threat_score)
-
-# Cullowhee Creek animated state
-if "depth" not in st.session_state: st.session_state.depth = 0.87
-if "flow"  not in st.session_state: st.session_state.flow  = 22.4
-st.session_state.depth = round(max(0.50, min(1.25, st.session_state.depth + np.random.uniform(-0.015, 0.015))), 2)
-st.session_state.flow  = round(max(10.0, min(40.0, st.session_state.flow  + np.random.uniform(-0.30,  0.30))),  2)
-
-
-# ─────────────────────────────────────────────
-#  6. RENDER
-# ─────────────────────────────────────────────
-
-# ── HEADER ──────────────────────────────────
-st.markdown(f"""
-<div class="site-header">
-  <div class="site-title">NOAH: CULLOWHEE CREEK FLOOD WARNING</div>
-  <div class="site-sub">
-    Cullowhee Creek Watershed — Jackson County, NC
-    &nbsp;|&nbsp;
-    {datetime.now().strftime("%A, %B %d %Y — %H:%M:%S")}
-  </div>
-</div>""", unsafe_allow_html=True)
-
-# ── FLOOD THREAT BANNER ─────────────────────
-st.markdown(f"""
-<div style="background:{t_bg}; border:2px solid {t_color}; border-radius:10px;
-            padding:22px 30px; margin-bottom:16px; text-align:center;">
-  <div style="font-family:'Share Tech Mono',monospace; font-size:0.75em;
-              color:{t_color}; letter-spacing:4px; margin-bottom:6px;">
-    ⚡ COMPOSITE FLOOD THREAT SCORE
-  </div>
-  <div style="font-size:3.5em; font-weight:700; color:{t_color};
-              letter-spacing:5px; line-height:1.0;">
-    {t_label}
-  </div>
-  <div style="font-size:1.8em; font-weight:600; color:white; margin-top:4px;">
-    {threat_score:.2f} / 100
-  </div>
-  <div style="background:rgba(255,255,255,0.08); border-radius:6px;
-              height:8px; margin:12px auto; max-width:500px;">
-    <div style="background:{t_color}; width:{threat_score}%; height:8px;
-                border-radius:6px;"></div>
-  </div>
-  <div style="font-family:'Share Tech Mono',monospace; font-size:0.72em;
-              color:#7AACCC; margin-top:6px;">
-    SOIL SAT {soil_sat:.2f}%
-    &nbsp;·&nbsp; QPF(24h) {qpf_24h:.2f}"
-    &nbsp;·&nbsp; PoP {pop_24h:.2f}%
-    &nbsp;·&nbsp; TUCK STAGE {f"{usgs_stage:.2f} ft" if usgs_stage else "N/A"}
-  </div>
-</div>""", unsafe_allow_html=True)
-
-# ── ROW 1: ATMOSPHERIC CONDITIONS ───────────
-st.markdown('<div class="panel"><div class="panel-title">🌧️ Atmospheric Conditions — NOAA/NWS Ground Truth</div>', unsafe_allow_html=True)
-if not noaa["ok"]:
-    st.warning("⚠️ METAR feed unavailable (K24A) — values may be stale", icon="⚠️")
-c1, c2, c3, c4, c5 = st.columns(5)
-with c1: st.plotly_chart(make_dial(noaa["wind"],  "WIND SPEED",      0,  50,  " mph",  "#5AC8FA", src="K24A METAR"), use_container_width=True)
-with c2: st.plotly_chart(make_dial(noaa["hum"],   "HUMIDITY",        0, 100,  "%",     "#0077FF", src="K24A METAR"), use_container_width=True)
-with c3: st.plotly_chart(make_dial(noaa["temp"],  "TEMPERATURE",     0, 110,  "°F",    "#00FF9C", sub="±2°F Valley Corr.", src="K24A METAR"), use_container_width=True)
-with c4: st.plotly_chart(make_dial(noaa["press"], "PRESSURE",       28,  32,  " inHg", "#AAFF00", src="K24A METAR"), use_container_width=True)
-with c5: st.plotly_chart(make_dial(soil_sat,      "SOIL SATURATION", 0, 100,  "%",     soil_color, sub=f'{soil_in}" Stored', src="OPEN-METEO MODEL"), use_container_width=True)
-st.markdown('</div>', unsafe_allow_html=True)
-
-# ── ROW 3: USGS TUCKASEGEE ──────────────────
-st.markdown('<div class="panel"><div class="panel-title">📡 USGS Real-Time — Tuckasegee River at Cullowhee (Site 02178400)</div>', unsafe_allow_html=True)
-if usgs["ok"]:
-    stage = usgs.get("stage_ft", 0) or 0
-    flow  = usgs.get("flow_cfs",  0) or 0
-    stage_color = "#FF3333" if stage > 7 else "#FFD700" if stage > 5 else "#00FF9C"
-    flow_color  = "#FF3333" if flow > 3000 else "#FFD700" if flow > 1000 else "#00FF9C"
-    flow_max    = max(5000, flow * 1.5)
-    u1, u2, u3 = st.columns([1, 1, 3])
-    with u1:
-        st.plotly_chart(make_dial(stage, "STAGE HEIGHT", 0, 15, " ft", stage_color,
-                                  sub="Flood Stage: 8.00 ft", src="USGS 02178400"), use_container_width=True)
-    with u2:
-        st.plotly_chart(make_dial(flow, "STREAMFLOW", 0, flow_max, " cfs", flow_color,
-                                  sub="Action: 1,000.00 cfs", src="USGS 02178400"), use_container_width=True)
-    with u3:
-        st.markdown(f"""
-<div style="background:rgba(0,80,160,0.10); border:1px solid #0077FF; border-radius:8px;
-            padding:20px; font-family:'Share Tech Mono',monospace; height:185px;
-            display:flex; flex-direction:column; justify-content:center;">
-  <div style="color:#0077FF; letter-spacing:1px; font-size:0.85em;">📊 TUCKASEGEE WATERSHED STATUS</div>
-  <div style="font-size:1.05em; color:#7AACCC; margin-top:12px; line-height:2.0;">
-    Stage: <span style="color:{stage_color}; font-weight:700;">{stage:.2f} ft</span>
-    &nbsp;|&nbsp; Flow: <span style="color:{flow_color}; font-weight:700;">{flow:.2f} cfs</span><br>
-    Flood Stage: <span style="color:#FFD700;">8.00 ft</span>
-    &nbsp;|&nbsp; Action Stage: <span style="color:#FFD700;">6.00 ft</span><br>
-    <span style="color:#1A6060; font-size:0.85em;">USGS 02178400 · Observed {usgs.get("dt","--:--")} EST</span>
-  </div>
-</div>""", unsafe_allow_html=True)
-else:
-    st.warning("⚠️ USGS stream gauge unavailable — verify waterservices.usgs.gov", icon="⚠️")
-st.markdown('</div>', unsafe_allow_html=True)
-
-# ── ROW 3: 7-DAY FLOOD OUTLOOK ──────────────
-st.markdown('<div class="panel"><div class="panel-title">📅 7-Day Predictive Flood & Rainfall Outlook (NWS Gridpoint QPF — Real Data)</div>', unsafe_allow_html=True)
-if not fc_ok:
-    st.warning(f"⚠️ NWS forecast unavailable — {fc_err}", icon="⚠️")
-elif forecast:
-    pcols = st.columns(7)
-    for i, d in enumerate(forecast):
-        risk  = min(100, round((soil_sat * 0.35) + (d["pop"] * 0.35) + (d["qpf"] * 20), 1))
-        color = "#00FF9C" if risk < 30 else "#AAFF00" if risk < 50 else "#FFD700" if risk < 65 else "#FF8800" if risk < 80 else "#FF3333"
-        with pcols[i]:
-            st.markdown(f"""
-<div style="background:rgba(255,255,255,0.03); border-top:4px solid {color};
-            border-radius:8px; padding:12px 8px; text-align:center;">
-  <div style="font-weight:700; font-size:1.1em;">{d['short_name']}</div>
-  <div style="font-size:0.75em; color:#5A7090; margin-bottom:4px;">{d['date']}</div>
-  <div style="font-size:1.6em; line-height:1.2;">{nws_icon(d['icon_txt'])}</div>
-  <div style="color:{color}; font-size:1.55em; font-weight:700; margin:5px 0;">{risk:.2f}%</div>
-  <div style="color:#00FFCC; font-family:'Share Tech Mono',monospace; font-size:0.85em;">{d['qpf']:.2f}"</div>
-  <div style="color:#7AACCC; font-size:0.75em;">{d['pop']:.2f}% PoP</div>
-  <div style="color:#7AACCC; font-size:0.75em;">{d['temp']:.2f}°F</div>
-</div>""", unsafe_allow_html=True)
-st.markdown('</div>', unsafe_allow_html=True)
-
-# ── ROW 2: CULLOWHEE CREEK ───────────────────
-st.markdown('<div class="panel"><div class="panel-title">🌊 Cullowhee Creek — Local Sensor Feed</div>', unsafe_allow_html=True)
-h1, h2, h3 = st.columns([2, 2, 3])
-with h1:
-    st.components.v1.html(make_animated_gauge_html(
-        "g_depth", st.session_state.depth,
-        "STREAM DEPTH", 0.0, 8.0, " ft",
-        [{"range": [0.0, 4.0], "color": "rgba(0,255,156,0.15)"},
-         {"range": [4.0, 6.0], "color": "rgba(255,215,0,0.20)"},
-         {"range": [6.0, 8.0], "color": "rgba(255,51,51,0.25)"}],
-        "#00FF9C", "NORMAL", "#00FF9C",
-        f'Stage: {st.session_state.depth:.2f} ft  |  Flood: 6.00 ft', "NEMO SENSOR"
-    ), height=230)
-with h2:
-    st.components.v1.html(make_animated_gauge_html(
-        "g_flow", st.session_state.flow,
-        "DISCHARGE", 0.0, 200.0, " cfs",
-        [{"range": [0.0,   80.0], "color": "rgba(0,255,156,0.15)"},
-         {"range": [80.0, 140.0], "color": "rgba(255,215,0,0.20)"},
-         {"range": [140.0,200.0], "color": "rgba(255,51,51,0.25)"}],
-        "#5AC8FA", "LOW FLOW", "#5AC8FA",
-        f"Discharge: {st.session_state.flow:.2f} cfs", "NEMO SENSOR"
-    ), height=230)
-with h3:
-    st.markdown(f"""
-<div style="background:rgba(0,80,160,0.10); border:1px solid #0077FF; border-radius:8px;
-            padding:20px; font-family:'Share Tech Mono',monospace;">
   <div style="color:#0077FF; letter-spacing:1px; font-size:0.85em;">
-    📊 SOIL MOISTURE MODEL (30-DAY ACCUMULATED)
+    \U0001f4ca TUCKASEGEE WATERSHED STATUS
   </div>
-  <div style="font-size:1.4em; font-weight:700; color:{soil_color}; margin:10px 0;">
-    {soil_in:.2f} INCHES STORED
-  </div>
-  <div style="font-size:0.8em; color:#7AACCC; line-height:1.9;">
-    30d Precip: {rain_30d:.2f}"<br>
-    Clay Loam Capacity: 2.66"<br>
-    ET Extraction (Mar): 1.80"<br>
-    <b>Infiltration: {soil_sat:.2f}% Capacity</b><br>
-    <span style="color:#1A5070;">
-      SRC: OPEN-METEO ERA5 · {"LIVE" if prcp_ok else "CACHED FALLBACK"}
+  <div style="font-size:1.05em; color:#7AACCC; margin-top:12px; line-height:2.0;">
+    Stage: <span style="color:{stage_color}; font-weight:700;">{stage:.2f} ft</span>
+    &nbsp;|&nbsp; Flow: <span style="color:{flow_color}; font-weight:700;">{flow:.2f} cfs</span><br>
+    Flood Stage: <span style="color:#FFD700;">8.00 ft</span>
+    &nbsp;|&nbsp; Action Stage: <span style="color:#FFD700;">6.00 ft</span><br>
+    <span style="color:#1A6060; font-size:0.85em;">
+      USGS 02178400 \u00b7 Observed {usgs.get("dt", "--:--")} EST
     </span>
   </div>
 </div>""", unsafe_allow_html=True)
+else:
+    st.warning("\u26a0\ufe0f USGS stream gauge unavailable \u2014 verify waterservices.usgs.gov", icon="\u26a0\ufe0f")
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ── ROW 5: LIVE RADAR ───────────────────────
-st.markdown('<div class="panel"><div class="panel-title">📡 Live Regional Radar — Western NC</div>', unsafe_allow_html=True)
+st.markdown('<div class="panel"><div class="panel-title">\U0001f4e1 Live Regional Radar \u2014 Western NC</div>', unsafe_allow_html=True)
 try:
     st.components.v1.html(
         f'<iframe src="https://www.rainviewer.com/map.html?loc={LAT},{LON},9'
@@ -1009,5 +463,5 @@ try:
         height=510,
     )
 except Exception:
-    st.error("⚠️ Radar iframe unavailable — visit rainviewer.com directly for regional coverage.")
+    st.error("\u26a0\ufe0f Radar iframe unavailable \u2014 visit rainviewer.com directly for regional coverage.")
 st.markdown('</div>', unsafe_allow_html=True)
