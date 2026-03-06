@@ -56,41 +56,27 @@ def fetch_noaa_metrics():
 
 AWN_API_KEY = "daa4fbbae2124b72834c2c9d80a0356a43b25c684205430eafe56625c46dbc9d"
 AWN_APP_KEY = "87e44c0fe99d469f9a1d330747a231bc285a221db3f14779af518678015fe8e0"
+AWN_MAC     = "35c7b0accb75a84d7891d82f125001a8"  # from dashboard URL
 
 @st.cache_data(ttl=60)
 def fetch_awn_data():
-    """Fetch latest data from Ambient Weather Network — auto-discovers station MAC."""
+    """Fetch latest data from Ambient Weather Network — subscribed station."""
     try:
-        # Step 1: discover all accessible devices
-        devices = requests.get(
-            "https://api.ambientweather.net/v1/devices",
-            params={"apiKey": AWN_API_KEY, "applicationKey": AWN_APP_KEY},
-            timeout=10
-        ).json()
-
-        if not devices or not isinstance(devices, list):
-            return {"ok": False, "err": "No devices found"}
-
-        # Use first available device
-        mac   = devices[0]["macAddress"]
-        label = devices[0].get("info", {}).get("name", mac)
-
-        # Step 2: fetch latest reading for that device
         data = requests.get(
-            f"https://api.ambientweather.net/v1/devices/{mac}",
+            f"https://api.ambientweather.net/v1/devices/{AWN_MAC}",
             params={"apiKey": AWN_API_KEY, "applicationKey": AWN_APP_KEY,
                     "limit": 1},
             timeout=10
         ).json()
 
         if not data or not isinstance(data, list):
-            return {"ok": False, "err": "No data returned"}
+            return {"ok": False, "err": f"No data returned for MAC {AWN_MAC}"}
 
         obs = data[0]
         return {
             "ok":        True,
-            "label":     label,
-            "mac":       mac,
+            "label":     "AWN STATION",
+            "mac":       AWN_MAC,
             "temp":      round(float(obs.get("tempf",    obs.get("temp", 50))), 2),
             "hum":       round(float(obs.get("humidity", 50)), 2),
             "wind":      round(float(obs.get("windspeedmph", 0)), 2),
