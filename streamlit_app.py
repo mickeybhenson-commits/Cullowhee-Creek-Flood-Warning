@@ -339,18 +339,7 @@ c1, c2, c3, c4, c5 = st.columns(5)
 with c1: st.plotly_chart(make_dial(noaa["wind"],  "WIND SPEED",      0,  50,  " mph",  "#5AC8FA", src="K24A METAR"), use_container_width=True)
 with c2: st.plotly_chart(make_dial(noaa["hum"],   "HUMIDITY",        0, 100,  "%",     "#0077FF", src="K24A METAR"), use_container_width=True)
 with c3: st.plotly_chart(make_dial(noaa["temp"],  "TEMPERATURE",     0, 110,  " F",    "#FF3333", src="OPEN-METEO"), use_container_width=True)
-with c4:
-    rain_status = "TRACE" if noaa["precip"] == 0 else "ACTIVE"
-    rain_color  = "#0077FF" if noaa["precip"] > 0 else "#00FF9C"
-    st.components.v1.html(make_animated_gauge_html(
-        "g_rain", noaa["precip"],
-        "RAIN NOW", 0.0, 2.0, '"',
-        [{"range": [0.0,  0.5], "color": "rgba(0,255,156,0.15)"},
-         {"range": [0.5,  1.0], "color": "rgba(255,215,0,0.20)"},
-         {"range": [1.0,  2.0], "color": "rgba(255,51,51,0.25)"}],
-        rain_color, rain_status, rain_color,
-        "Hourly Precipitation", "OPEN-METEO"
-    ), height=230)
+with c4: st.plotly_chart(make_dial(noaa["precip"], "RAIN NOW", 0, 10, '"',  "#0077FF", sub="Hourly Precipitation", src="OPEN-METEO"), use_container_width=True)
 with c5: st.plotly_chart(make_dial(soil_sat,      "SOIL SATURATION", 0, 100,  "%",     "#0077FF", sub=f'{soil_in:.2f}" Stored', src="OPEN-METEO"), use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
