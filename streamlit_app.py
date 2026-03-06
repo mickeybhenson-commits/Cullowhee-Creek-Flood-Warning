@@ -167,7 +167,7 @@ def fetch_30d_precip():
 def get_soil_model(total_30d):
     MAX_CAP = 2.66
     ET_LOSS = 0.06 * 30
-    stored  = max(0.50, min(MAX_CAP, total_30d - ET_LOSS))
+    stored  = max(0.00, min(MAX_CAP, total_30d - ET_LOSS))
     sat_pct = (stored / MAX_CAP) * 100
     color   = "#FF3333" if sat_pct > 85 else "#FFD700" if sat_pct > 60 else "#00FF9C"
     return round(stored, 2), round(sat_pct, 2), color
