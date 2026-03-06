@@ -462,19 +462,6 @@ if usgs["ok"]:
 else:
     st.warning("USGS stream gauge unavailable — verify waterservices.usgs.gov")
 st.markdown('</div>', unsafe_allow_html=True)
-
-# ── ROW 5: NWS WEATHER MAP ───────────────────
-st.markdown('<div class="panel"><div class="panel-title">&#x1F5FA; NWS Active Alerts &mdash; Western NC / Southern Appalachians (GSP Office)</div>', unsafe_allow_html=True)
-try:
-    st.components.v1.html(
-        '<iframe src="https://forecast.weather.gov/wwamap/png/US.png" '
-        'width="100%" height="460" style="border-radius:8px; border:none; background:#04090F;"></iframe>',
-        height=470,
-    )
-except Exception:
-    st.error("NWS weather map unavailable — visit forecast.weather.gov directly.")
-st.markdown('</div>', unsafe_allow_html=True)
-
 # ── ROW 6: LIVE RADAR ────────────────────────
 st.markdown('<div class="panel"><div class="panel-title">&#x1F4E1; Live Regional Radar &mdash; Western NC</div>', unsafe_allow_html=True)
 try:
