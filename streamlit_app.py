@@ -144,13 +144,18 @@ def fetch_30d_precip():
         r = requests.get(
             "https://api.open-meteo.com/v1/forecast",
             params={"latitude": LAT, "longitude": LON,
-                    "daily": "precipitation_sum", "past_days": 30,
+                    "daily": "precipitation_sum,snowfall_sum", "past_days": 30,
                     "forecast_days": 0, "precipitation_unit": "inch"},
             timeout=10
         ).json()
-        return round(sum(r["daily"]["precipitation_sum"]), 2), True
+        precip = r["daily"]["precipitation_sum"]
+        snow   = r["daily"].get("snowfall_sum", [0]*30)
+        total_30d = round(sum(precip), 2)
+        total_7d  = round(sum(precip[-7:]), 2)
+        snow_7d   = round(sum(snow[-7:]) * 0.393701, 2)  # cm -> inches
+        return total_30d, total_7d, snow_7d, True
     except:
-        return 4.20, False
+        return 4.20, 1.00, 0.00, False
 
 
 
@@ -273,7 +278,7 @@ font-family:'Rajdhani',sans-serif;color:white;">
 
 noaa                    = fetch_openmeteo_current()
 forecast, fc_ok, fc_err = fetch_nws_forecast()
-rain_30d, prcp_ok       = fetch_30d_precip()
+rain_30d, rain_7d, snow_7d, prcp_ok = fetch_30d_precip()
 soil_in, soil_sat, soil_color = get_soil_model(rain_30d)
 
 qpf_24h    = forecast[0]["qpf"] if forecast else 0.0
@@ -378,6 +383,7 @@ with h3:
     {soil_in:.2f} INCHES STORED
   </div>
   <div style="font-size:0.8em; color:#7AACCC; line-height:1.9;">
+    7-Day Rain: {rain_7d:.2f}&quot; &nbsp;|&nbsp; 7-Day Snow: {snow_7d:.2f}&quot;<br>
     30d Precip: {rain_30d:.2f}&quot;<br>
     Clay Loam Capacity: 2.66&quot;<br>
     ET Extraction (Mar): 1.80&quot;<br>
