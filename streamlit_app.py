@@ -392,7 +392,7 @@ with h3:
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ── ROW 3: 7-DAY FLOOD OUTLOOK ──────────────
-st.markdown('<div class="panel"><div class="panel-title">&#x1F4C5; 7-Day Predictive Flood &amp; Rainfall Outlook (NWS Gridpoint QPF &mdash; Real Data)</div>', unsafe_allow_html=True)
+st.markdown('<div class="panel"><div class="panel-title">&#x1F4C5; 7-Day Flood &amp; Rainfall Outlook &mdash; Cullowhee Creek Watershed (NWS GSP Gridpoint)</div>', unsafe_allow_html=True)
 if not fc_ok:
     st.warning(f"NWS forecast unavailable — {fc_err}")
 elif forecast:
