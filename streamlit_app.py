@@ -32,8 +32,6 @@ html, body, .stApp { background-color: #04090F; color: #E0E8F0; font-family: 'Ra
 </style>
 """, unsafe_allow_html=True)
 
-DEG = "°"
-BULL = "·"
 
 # ─────────────────────────────────────────────
 #  2. DATA ACQUISITION
@@ -187,17 +185,17 @@ def threat_meta(score):
 
 def nws_icon(txt):
     t = txt.lower()
-    if any(x in t for x in ["thunder", "storm"]):  return "&#x26C8;"
-    if any(x in t for x in ["snow", "blizzard"]):  return "&#x2744;"
-    if any(x in t for x in ["sleet", "freezing"]): return "&#x1F328;"
-    if any(x in t for x in ["fog", "haze"]):       return "&#x1F32B;"
-    if "shower" in t:                              return "&#x1F326;"
-    if any(x in t for x in ["rain", "drizzle"]):   return "&#x1F327;"
-    if "partly cloudy" in t:                       return "&#x26C5;"
-    if "mostly cloudy" in t:                       return "&#x1F325;"
-    if "cloudy" in t:                              return "&#x2601;"
-    if any(x in t for x in ["sunny", "clear"]):   return "&#x2600;"
-    return "&#x1F321;"
+    if any(x in t for x in ["thunder", "storm"]):  return "TSTM"
+    if any(x in t for x in ["snow", "blizzard"]):  return "SNOW"
+    if any(x in t for x in ["sleet", "freezing"]): return "SLEET"
+    if any(x in t for x in ["fog", "haze"]):       return "FOG"
+    if "shower" in t:                              return "SHWRS"
+    if any(x in t for x in ["rain", "drizzle"]):   return "RAIN"
+    if "partly cloudy" in t:                       return "PTCLDY"
+    if "mostly cloudy" in t:                       return "MSTCLDY"
+    if "cloudy" in t:                              return "CLOUDY"
+    if any(x in t for x in ["sunny", "clear"]):   return "SUNNY"
+    return "---"
 
 
 # ─────────────────────────────────────────────
@@ -296,24 +294,24 @@ st.session_state.flow  = round(max(10.0, min(40.0, st.session_state.flow  + np.r
 #  6. RENDER
 # ─────────────────────────────────────────────
 
-# ── HEADER ──────────────────────────────────
+# HEADER
 st.markdown(f"""
 <div class="site-header">
   <div class="site-title">NOAH: CULLOWHEE CREEK FLOOD WARNING</div>
   <div class="site-sub">
     Cullowhee Creek Watershed &mdash; Jackson County, NC
     &nbsp;|&nbsp;
-    {datetime.now().strftime("%A, %B %d %Y &mdash; %H:%M:%S")}
+    {datetime.now().strftime("%A, %B %d %Y")} &mdash; {datetime.now().strftime("%H:%M:%S")}
   </div>
 </div>""", unsafe_allow_html=True)
 
-# ── FLOOD THREAT BANNER ──────────────────────
+# FLOOD THREAT BANNER
 st.markdown(f"""
 <div style="background:{t_bg}; border:2px solid {t_color}; border-radius:10px;
             padding:22px 30px; margin-bottom:16px; text-align:center;">
   <div style="font-family:'Share Tech Mono',monospace; font-size:0.75em;
               color:{t_color}; letter-spacing:4px; margin-bottom:6px;">
-    &#x26A1; COMPOSITE FLOOD THREAT SCORE
+    COMPOSITE FLOOD THREAT SCORE
   </div>
   <div style="font-size:3.5em; font-weight:700; color:{t_color};
               letter-spacing:5px; line-height:1.0;">
@@ -333,10 +331,14 @@ st.markdown(f"""
     &nbsp;&middot;&nbsp; PoP {pop_24h:.2f}%
     &nbsp;&middot;&nbsp; TUCK STAGE {f"{usgs_stage:.2f} ft" if usgs_stage else "N/A"}
   </div>
+  <div style="font-family:'Share Tech Mono',monospace; font-size:0.68em;
+              color:#3A6A8A; margin-top:10px; letter-spacing:1px;">
+    EVALUATED FACTORS: Soil Saturation &middot; 24hr Rainfall Forecast &middot; Probability of Precipitation &middot; Tuckasegee River Stage
+  </div>
 </div>""", unsafe_allow_html=True)
 
-# ── ROW 1: ATMOSPHERIC CONDITIONS ───────────
-st.markdown('<div class="panel"><div class="panel-title">&#x1F327; Atmospheric Conditions &mdash; NOAA/NWS Ground Truth</div>', unsafe_allow_html=True)
+# ROW 1: ATMOSPHERIC CONDITIONS
+st.markdown('<div class="panel"><div class="panel-title">ATMOSPHERIC CONDITIONS &mdash; NOAA / NWS GROUND TRUTH</div>', unsafe_allow_html=True)
 if not noaa["ok"]:
     st.warning("METAR feed unavailable (K24A) — values may be stale")
 c1, c2, c3, c4, c5 = st.columns(5)
@@ -347,8 +349,8 @@ with c4: st.plotly_chart(make_dial(noaa["press"], "PRESSURE",       28,  32,  " 
 with c5: st.plotly_chart(make_dial(soil_sat,      "SOIL SATURATION", 0, 100,  "%",     soil_color, sub=f'{soil_in:.2f}" Stored', src="OPEN-METEO"), use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ── ROW 2: CULLOWHEE CREEK ───────────────────
-st.markdown('<div class="panel"><div class="panel-title">&#x1F30A; Cullowhee Creek &mdash; Local Sensor Feed</div>', unsafe_allow_html=True)
+# ROW 2: CULLOWHEE CREEK
+st.markdown('<div class="panel"><div class="panel-title">CULLOWHEE CREEK &mdash; LOCAL SENSOR FEED</div>', unsafe_allow_html=True)
 h1, h2, h3 = st.columns([2, 2, 3])
 with h1:
     st.components.v1.html(make_animated_gauge_html(
@@ -376,7 +378,7 @@ with h3:
 <div style="background:rgba(0,80,160,0.10); border:1px solid #0077FF; border-radius:8px;
             padding:20px; font-family:'Share Tech Mono',monospace;">
   <div style="color:#0077FF; letter-spacing:1px; font-size:0.85em;">
-    &#x1F4CA; SOIL MOISTURE MODEL (30-DAY ACCUMULATED)
+    SOIL MOISTURE MODEL (30-DAY ACCUMULATED)
   </div>
   <div style="font-size:1.4em; font-weight:700; color:{soil_color}; margin:10px 0;">
     {soil_in:.2f} INCHES STORED
@@ -391,30 +393,28 @@ with h3:
 </div>""", unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ── ROW 3: 7-DAY FLOOD OUTLOOK ──────────────
-st.markdown('<div class="panel"><div class="panel-title">&#x1F4C5; 7-Day Flood &amp; Rainfall Outlook &mdash; Cullowhee Creek Watershed (NWS GSP Gridpoint)</div>', unsafe_allow_html=True)
+# ROW 3: 7-DAY FLOOD OUTLOOK
+st.markdown('<div class="panel"><div class="panel-title">7-DAY FLOOD &amp; RAINFALL OUTLOOK &mdash; CULLOWHEE CREEK WATERSHED (NWS GSP GRIDPOINT)</div>', unsafe_allow_html=True)
 if not fc_ok:
     st.warning(f"NWS forecast unavailable — {fc_err}")
 elif forecast:
     pcols = st.columns(7)
     for i, d in enumerate(forecast):
-        risk  = min(100.0, round((soil_sat * 0.35) + (d["pop"] * 0.35) + (d["qpf"] * 20), 2))
-        color = "#00FF9C" if risk < 30 else "#AAFF00" if risk < 50 else "#FFD700" if risk < 65 else "#FF8800" if risk < 80 else "#FF3333"
-        icon  = nws_icon(d["icon_txt"])
+        risk      = min(100.0, round((soil_sat * 0.35) + (d["pop"] * 0.35) + (d["qpf"] * 20), 2))
+        color     = "#00FF9C" if risk < 30 else "#AAFF00" if risk < 50 else "#FFD700" if risk < 65 else "#FF8800" if risk < 80 else "#FF3333"
+        icon      = nws_icon(d["icon_txt"])
         temp_str  = f"{d['temp']:.2f}"
         qpf_str   = f"{d['qpf']:.2f}"
         pop_str   = f"{d['pop']:.2f}"
         risk_str  = f"{risk:.2f}"
-        sname     = d["short_name"]
-        ddate     = d["date"]
         with pcols[i]:
             st.markdown(
                 '<div style="background:rgba(255,255,255,0.03); border-top:4px solid '
                 + color
                 + '; border-radius:8px; padding:12px 8px; text-align:center;">'
-                + '<div style="font-weight:700; font-size:1.1em;">' + sname + '</div>'
-                + '<div style="font-size:0.75em; color:#5A7090; margin-bottom:4px;">' + ddate + '</div>'
-                + '<div style="font-size:1.6em; line-height:1.2;">' + icon + '</div>'
+                + '<div style="font-weight:700; font-size:1.1em;">' + d["short_name"] + '</div>'
+                + '<div style="font-size:0.75em; color:#5A7090; margin-bottom:4px;">' + d["date"] + '</div>'
+                + '<div style="font-family:\'Share Tech Mono\',monospace; font-size:0.75em; color:#7AACCC; margin-bottom:4px;">' + icon + '</div>'
                 + '<div style="color:' + color + '; font-size:1.55em; font-weight:700; margin:5px 0;">' + risk_str + '%</div>'
                 + '<div style="color:' + color + '; font-family:\'Share Tech Mono\',monospace; font-size:0.72em; letter-spacing:2px; margin-bottom:4px;">FLOOD RISK</div>'
                 + '<div style="color:#00FFCC; font-family:\'Share Tech Mono\',monospace; font-size:0.85em;">' + qpf_str + '&quot;</div>'
@@ -425,8 +425,8 @@ elif forecast:
             )
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ── ROW 4: USGS TUCKASEGEE ──────────────────
-st.markdown('<div class="panel"><div class="panel-title">&#x1F4E1; USGS Real-Time &mdash; Tuckasegee River at Cullowhee (Site 02178400)</div>', unsafe_allow_html=True)
+# ROW 4: USGS TUCKASEGEE
+st.markdown('<div class="panel"><div class="panel-title">USGS REAL-TIME &mdash; TUCKASEGEE RIVER AT CULLOWHEE (SITE 02178400)</div>', unsafe_allow_html=True)
 if usgs["ok"]:
     stage = usgs.get("stage_ft", 0.0) or 0.0
     flow  = usgs.get("flow_cfs",  0.0) or 0.0
@@ -448,7 +448,7 @@ if usgs["ok"]:
             '<div style="background:rgba(0,80,160,0.10); border:1px solid #0077FF; border-radius:8px;'
             ' padding:20px; font-family:\'Share Tech Mono\',monospace; height:185px;'
             ' display:flex; flex-direction:column; justify-content:center;">'
-            '<div style="color:#0077FF; letter-spacing:1px; font-size:0.85em;">&#x1F4CA; TUCKASEGEE WATERSHED STATUS</div>'
+            '<div style="color:#0077FF; letter-spacing:1px; font-size:0.85em;">TUCKASEGEE WATERSHED STATUS</div>'
             '<div style="font-size:1.05em; color:#7AACCC; margin-top:12px; line-height:2.0;">'
             'Stage: <span style="color:' + stage_color + '; font-weight:700;">' + f"{stage:.2f}" + ' ft</span>'
             ' &nbsp;|&nbsp; '
@@ -463,8 +463,9 @@ if usgs["ok"]:
 else:
     st.warning("USGS stream gauge unavailable — verify waterservices.usgs.gov")
 st.markdown('</div>', unsafe_allow_html=True)
-# ── ROW 6: LIVE RADAR ────────────────────────
-st.markdown('<div class="panel"><div class="panel-title">&#x1F4E1; Live Regional Radar &mdash; Western NC</div>', unsafe_allow_html=True)
+
+# ROW 5: LIVE RADAR
+st.markdown('<div class="panel"><div class="panel-title">LIVE REGIONAL RADAR &mdash; WESTERN NC</div>', unsafe_allow_html=True)
 try:
     st.components.v1.html(
         f'<iframe src="https://www.rainviewer.com/map.html?loc={LAT},{LON},9'
