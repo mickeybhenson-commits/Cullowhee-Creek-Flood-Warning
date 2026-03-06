@@ -144,18 +144,18 @@ def fetch_30d_precip():
         r = requests.get(
             "https://api.open-meteo.com/v1/forecast",
             params={"latitude": LAT, "longitude": LON,
-                    "daily": "precipitation_sum,snowfall_sum", "past_days": 30,
+                    "daily": "precipitation_sum,snowfall_sum", "past_days": 14,
                     "forecast_days": 0, "precipitation_unit": "inch"},
             timeout=10
         ).json()
         precip = r["daily"]["precipitation_sum"]
         snow   = r["daily"].get("snowfall_sum", [0]*30)
-        total_30d = round(sum(precip), 2)
+        total_14d = round(sum(precip), 2)
         total_7d  = round(sum(precip[-7:]), 2)
         snow_7d   = round(sum(snow[-7:]) * 0.393701, 2)  # cm -> inches
-        return total_30d, total_7d, snow_7d, True
+        return total_14d, total_7d, snow_7d, True
     except:
-        return 4.20, 1.00, 0.00, False
+        return 2.10, 0.50, 0.00, False
 
 
 
@@ -166,7 +166,7 @@ def fetch_30d_precip():
 
 def get_soil_model(total_30d):
     MAX_CAP = 2.66
-    ET_LOSS = 0.06 * 30
+    ET_LOSS = 0.06 * 14
     stored  = max(0.00, min(MAX_CAP, total_30d - ET_LOSS))
     sat_pct = (stored / MAX_CAP) * 100
     color   = "#FF3333" if sat_pct > 85 else "#FFD700" if sat_pct > 60 else "#00FF9C"
@@ -384,9 +384,9 @@ with h3:
   </div>
   <div style="font-size:0.8em; color:#7AACCC; line-height:1.9;">
     7-Day Rain: {rain_7d:.2f}&quot; &nbsp;|&nbsp; 7-Day Snow: {snow_7d:.2f}&quot;<br>
-    30d Precip: {rain_30d:.2f}&quot;<br>
+    14d Precip: {rain_30d:.2f}&quot;<br>
     Clay Loam Capacity: 2.66&quot;<br>
-    ET Extraction (Mar): 1.80&quot;<br>
+    ET Extraction (14d Mar): 0.84&quot;<br>
     <b>Infiltration: {soil_sat:.2f}% Capacity</b><br>
     <span style="color:#1A5070;">SRC: OPEN-METEO ERA5 &middot; {live_label}</span>
   </div>
