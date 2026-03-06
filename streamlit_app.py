@@ -285,10 +285,10 @@ threat_score      = compute_flood_threat(soil_sat, qpf_24h, pop_24h, usgs_stage)
 t_label, t_color, t_bg = threat_meta(threat_score)
 
 # Demo animated creek state
-if "depth" not in st.session_state: st.session_state.depth = 5.85
-if "flow"  not in st.session_state: st.session_state.flow  = 5.12
-st.session_state.depth = round(max(5.50, min(6.25, st.session_state.depth + np.random.uniform(-0.01, 0.01))), 2)
-st.session_state.flow  = round(max(4.80, min(5.40, st.session_state.flow  + np.random.uniform(-0.01, 0.01))), 2)
+if "depth" not in st.session_state: st.session_state.depth = 0.87
+if "flow"  not in st.session_state: st.session_state.flow  = 22.4
+st.session_state.depth = round(max(0.50, min(1.25, st.session_state.depth + np.random.uniform(-0.015, 0.015))), 2)
+st.session_state.flow  = round(max(10.0, min(40.0, st.session_state.flow  + np.random.uniform(-0.30,  0.30))),  1)
 
 
 # ─────────────────────────────────────────────
@@ -438,21 +438,23 @@ h1, h2, h3 = st.columns([2, 2, 3])
 with h1:
     st.components.v1.html(make_animated_gauge_html(
         "g_depth", st.session_state.depth,
-        "STREAM DEPTH", 5.5, 6.25, '"',
-        [{"range": [5.5, 6.0], "color": "rgba(0,255,156,0.15)"},
-         {"range": [6.0, 6.25],"color": "rgba(255,51,51,0.20)"}],
+        "STREAM DEPTH", 0.0, 8.0, " ft",
+        [{"range": [0.0, 4.0], "color": "rgba(0,255,156,0.15)"},
+         {"range": [4.0, 6.0], "color": "rgba(255,215,0,0.20)"},
+         {"range": [6.0, 8.0], "color": "rgba(255,51,51,0.25)"}],
         "#00FF9C", "NORMAL", "#00FF9C",
-        f'Level: {st.session_state.depth}"', "NEMO SENSOR"
+        f'Stage: {st.session_state.depth} ft  |  Flood: 6.0 ft', "NEMO SENSOR"
     ), height=230)
 
 with h2:
     st.components.v1.html(make_animated_gauge_html(
         "g_flow", st.session_state.flow,
-        "STREAM FLOW", 4.8, 5.4, " cfs",
-        [{"range": [4.8, 5.2], "color": "rgba(0,255,156,0.15)"},
-         {"range": [5.2, 5.4], "color": "rgba(255,215,0,0.15)"}],
-        "#5AC8FA", "STABLE", "#5AC8FA",
-        f"Flow: {st.session_state.flow} cfs", "NEMO SENSOR"
+        "DISCHARGE", 0.0, 200.0, " cfs",
+        [{"range": [0.0,  80.0], "color": "rgba(0,255,156,0.15)"},
+         {"range": [80.0, 140.0],"color": "rgba(255,215,0,0.20)"},
+         {"range": [140.0,200.0],"color": "rgba(255,51,51,0.25)"}],
+        "#5AC8FA", "LOW FLOW", "#5AC8FA",
+        f"Discharge: {st.session_state.flow} cfs", "NEMO SENSOR"
     ), height=230)
 
 with h3:
