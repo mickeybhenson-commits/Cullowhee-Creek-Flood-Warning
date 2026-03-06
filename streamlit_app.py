@@ -153,27 +153,6 @@ def fetch_30d_precip():
         return 4.20, False
 
 
-@st.cache_data(ttl=900)
-def fetch_usgs_tuck():
-    try:
-        ts_list = requests.get(
-            f"https://waterservices.usgs.gov/nwis/iv/"
-            f"?sites={USGS_SITE}&parameterCd=00060,00065&format=json",
-            timeout=10
-        ).json()["value"]["timeSeries"]
-        data = {"ok": True}
-        for series in ts_list:
-            code = series["variable"]["variableCode"][0]["value"]
-            vals = series["values"][0]["value"]
-            if vals:
-                v  = float(vals[-1]["value"])
-                dt = vals[-1]["dateTime"]
-                if   code == "00060": data["flow_cfs"] = round(v, 2)
-                elif code == "00065": data["stage_ft"] = round(v, 2)
-                data["dt"] = datetime.fromisoformat(dt[:19]).strftime("%H:%M")
-        return data
-    except:
-        return {"ok": False, "flow_cfs": None, "stage_ft": None, "dt": "--:--"}
 
 
 # ─────────────────────────────────────────────
@@ -189,14 +168,11 @@ def get_soil_model(total_30d):
     return round(stored, 2), round(sat_pct, 2), color
 
 
-def compute_flood_threat(soil_sat, qpf_24h, pop_24h, usgs_stage=None):
-    soil_score = soil_sat * 0.35
-    qpf_score  = min(100.0, qpf_24h * 40) * 0.30
+def compute_flood_threat(soil_sat, qpf_24h, pop_24h):
+    soil_score = soil_sat * 0.40
+    qpf_score  = min(100.0, qpf_24h * 40) * 0.35
     pop_score  = pop_24h * 0.25
-    usgs_score = 0.0
-    if usgs_stage:
-        usgs_score = min(100.0, max(0.0, (usgs_stage - 3) / 5 * 100)) * 0.10
-    return round(min(100.0, soil_score + qpf_score + pop_score + usgs_score), 2)
+    return round(min(100.0, soil_score + qpf_score + pop_score), 2)
 
 
 def threat_meta(score):
@@ -298,14 +274,11 @@ font-family:'Rajdhani',sans-serif;color:white;">
 noaa                    = fetch_openmeteo_current()
 forecast, fc_ok, fc_err = fetch_nws_forecast()
 rain_30d, prcp_ok       = fetch_30d_precip()
-usgs                    = fetch_usgs_tuck()
 soil_in, soil_sat, soil_color = get_soil_model(rain_30d)
 
 qpf_24h    = forecast[0]["qpf"] if forecast else 0.0
 pop_24h    = forecast[0]["pop"] if forecast else 0.0
-usgs_stage = usgs.get("stage_ft") if usgs["ok"] else None
-
-threat_score            = compute_flood_threat(soil_sat, qpf_24h, pop_24h, usgs_stage)
+threat_score            = compute_flood_threat(soil_sat, qpf_24h, pop_24h)
 t_label, t_color, t_bg = threat_meta(threat_score)
 
 if "depth" not in st.session_state: st.session_state.depth = 0.87
@@ -353,11 +326,10 @@ st.markdown(f"""
     SOIL SAT {soil_sat:.2f}%
     &nbsp;&middot;&nbsp; QPF(24h) {qpf_24h:.2f}&quot;
     &nbsp;&middot;&nbsp; PoP {pop_24h:.2f}%
-    &nbsp;&middot;&nbsp; TUCK STAGE {f"{usgs_stage:.2f} ft" if usgs_stage else "N/A"}
   </div>
   <div style="font-family:'Share Tech Mono',monospace; font-size:0.68em;
               color:#3A6A8A; margin-top:10px; letter-spacing:1px;">
-    EVALUATED FACTORS: Soil Saturation &middot; 24hr Rainfall Forecast &middot; Probability of Precipitation &middot; Tuckasegee River Stage
+    EVALUATED FACTORS: Soil Saturation &middot; 24hr Rainfall Forecast &middot; Probability of Precipitation
   </div>
 </div>""", unsafe_allow_html=True)
 
@@ -449,44 +421,6 @@ elif forecast:
             )
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ROW 4: USGS TUCKASEGEE
-st.markdown('<div class="panel"><div class="panel-title">USGS REAL-TIME &mdash; TUCKASEGEE RIVER AT CULLOWHEE (SITE 02178400)</div>', unsafe_allow_html=True)
-if usgs["ok"]:
-    stage = usgs.get("stage_ft", 0.0) or 0.0
-    flow  = usgs.get("flow_cfs",  0.0) or 0.0
-    stage_color = "#FF3333" if stage > 7 else "#FFD700" if stage > 5 else "#00FF9C"
-    flow_color  = "#FF3333" if flow > 3000 else "#FFD700" if flow > 1000 else "#00FF9C"
-    flow_max    = max(5000.0, flow * 1.5)
-    u1, u2, u3  = st.columns([1, 1, 3])
-    with u1:
-        st.plotly_chart(make_dial(stage, "STAGE HEIGHT", 0, 15, " ft", stage_color,
-                                  sub="Flood Stage: 8.00 ft", src="USGS 02178400"),
-                        use_container_width=True)
-    with u2:
-        st.plotly_chart(make_dial(flow, "STREAMFLOW", 0, flow_max, " cfs", flow_color,
-                                  sub="Action: 1,000.00 cfs", src="USGS 02178400"),
-                        use_container_width=True)
-    with u3:
-        obs_time = usgs.get("dt", "--:--")
-        st.markdown(
-            '<div style="background:rgba(0,80,160,0.10); border:1px solid #0077FF; border-radius:8px;'
-            ' padding:20px; font-family:\'Share Tech Mono\',monospace; height:185px;'
-            ' display:flex; flex-direction:column; justify-content:center;">'
-            '<div style="color:#0077FF; letter-spacing:1px; font-size:0.85em;">TUCKASEGEE WATERSHED STATUS</div>'
-            '<div style="font-size:1.05em; color:#7AACCC; margin-top:12px; line-height:2.0;">'
-            'Stage: <span style="color:' + stage_color + '; font-weight:700;">' + f"{stage:.2f}" + ' ft</span>'
-            ' &nbsp;|&nbsp; '
-            'Flow: <span style="color:' + flow_color + '; font-weight:700;">' + f"{flow:.2f}" + ' cfs</span><br>'
-            'Flood Stage: <span style="color:#FFD700;">8.00 ft</span>'
-            ' &nbsp;|&nbsp; '
-            'Action Stage: <span style="color:#FFD700;">6.00 ft</span><br>'
-            '<span style="color:#1A6060; font-size:0.85em;">USGS 02178400 &middot; Observed ' + obs_time + ' EST</span>'
-            '</div></div>',
-            unsafe_allow_html=True
-        )
-else:
-    st.warning("USGS stream gauge unavailable — verify waterservices.usgs.gov")
-st.markdown('</div>', unsafe_allow_html=True)
 
 # ROW 5: LIVE RADAR
 st.markdown('<div class="panel"><div class="panel-title">LIVE REGIONAL RADAR &mdash; WESTERN NC</div>', unsafe_allow_html=True)
