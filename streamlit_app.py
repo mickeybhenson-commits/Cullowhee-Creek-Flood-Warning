@@ -283,6 +283,8 @@ def get_soil_model(sm_07, sm_728):
     RANGE = SOIL_POROSITY - SOIL_WILT_PT  # 0.288 m3/m3 = full available range
 
     sm_avg  = (sm_07 * 0.55) + (sm_728 * 0.45)
+    # Clamp to valid range — ERA5-Land can report values above theoretical porosity
+    sm_avg  = min(sm_avg, SOIL_POROSITY)
     sat_pct = min(100.0, max(0.0, (sm_avg - SOIL_WILT_PT) / RANGE * 100))
 
     stored_in = (sm_07 * 2.756) + (sm_728 * 8.268)
@@ -582,43 +584,40 @@ with h2:
     ), height=230)
 with h3:
     if sm_ok and sm_07 is not None:
-        sm_src_label  = "ERA5-LAND"
-        sm_ts_label   = sm_ts[:13].replace("T", " ") + " UTC" if sm_ts else "---"
-        sm_07_pct     = round((sm_07  - SOIL_WILT_PT) / (SOIL_POROSITY - SOIL_WILT_PT) * 100, 1)
-        sm_728_pct    = round((sm_728 - SOIL_WILT_PT) / (SOIL_POROSITY - SOIL_WILT_PT) * 100, 1)
-        sm_fc_pct_07  = round(sm_07  / SOIL_FIELD_CAP * 100, 1)
-        sm_fc_pct_728 = round(sm_728 / SOIL_FIELD_CAP * 100, 1)
-        sm_data_rows  = f"""
-    0-7cm (surface):&nbsp;&nbsp;{sm_07:.3f} m&#179;/m&#179; &nbsp;({sm_07_pct:.1f}% sat)<br>
-    7-28cm (root zone): {sm_728:.3f} m&#179;/m&#179; &nbsp;({sm_728_pct:.1f}% sat)<br>
-    Field Capacity:&nbsp;&nbsp;&nbsp;&nbsp;{SOIL_FIELD_CAP:.3f} m&#179;/m&#179; (loam/Ultisol)<br>
-    Saturation Point:&nbsp;&nbsp;{SOIL_POROSITY:.3f} m&#179;/m&#179;<br>
-    Data Valid:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{sm_ts_label}<br>"""
+        # Clamp: ERA5-Land can report moisture above theoretical porosity
+        sm_07_c   = min(sm_07,  SOIL_POROSITY)
+        sm_728_c  = min(sm_728, SOIL_POROSITY)
+        sm_range  = SOIL_POROSITY - SOIL_WILT_PT
+        sm_07_pct  = round(max(0, min(100, (sm_07_c  - SOIL_WILT_PT) / sm_range * 100)), 1)
+        sm_728_pct = round(max(0, min(100, (sm_728_c - SOIL_WILT_PT) / sm_range * 100)), 1)
+        sm_ts_label = sm_ts[:13].replace("T", " ") + " UTC" if sm_ts else "---"
+        src_line = f"ECMWF ERA5-LAND  |  Valid: {sm_ts_label}"
     else:
-        sm_src_label = "PROXY (ERA5 UNAVAIL)"
-        sm_data_rows = f"14d Precip: {rain_30d:.2f}&quot; (proxy input)<br>"
+        sm_07_c, sm_728_c = 0.0, 0.0
+        sm_07_pct, sm_728_pct = 0.0, 0.0
+        src_line = "ERA5-LAND unavailable — proxy mode"
 
-    st.markdown(f"""
-<div style="background:rgba(0,80,160,0.10); border:1px solid #0077FF; border-radius:8px;
-            padding:20px; font-family:'Share Tech Mono',monospace;">
-  <div style="color:#0077FF; letter-spacing:1px; font-size:0.85em;">
-    SOIL MOISTURE &mdash; ERA5-LAND VOLUMETRIC
-  </div>
-  <div style="font-size:1.4em; font-weight:700; color:{soil_color}; margin:10px 0;">
-    {soil_sat:.1f}% SATURATED
-  </div>
-  <div style="font-size:0.78em; color:#7AACCC; line-height:2.0;">
-    {sm_data_rows}
-    Stored Water:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{soil_in:.2f}&quot; (0-35cm profile)<br>
-    <hr style="border-color:#1a3a5a; margin:6px 0;">
-    <span style="color:#FFFF00;">STREAM MODEL INPUTS</span><br>
-    Rain 24h:&nbsp;&nbsp;{rain_24h:.2f}&quot; &nbsp;|&nbsp; QPF 24h: {qpf_24h:.2f}&quot;<br>
-    Rain 7d:&nbsp;&nbsp;&nbsp;{rain_7d:.2f}&quot; &nbsp;|&nbsp; WS Area: {WS_AREA_ACRES:,} ac<br>
-    CN (adj):&nbsp;&nbsp;{WS_CN_II} base &nbsp;|&nbsp; Tc: {WS_TC_HRS}h &nbsp;|&nbsp; n={WS_MANN_N}<br>
-    <b>Modeled Q: {modeled_flow:.1f} cfs &nbsp;|&nbsp; D: {modeled_depth:.2f} ft</b><br>
-    <span style="color:#1A5070;">MODEL: ECMWF {sm_src_label} + SCS-CN/RATIONAL &middot; PENDING SENSOR CAL</span>
-  </div>
-</div>""", unsafe_allow_html=True)
+    st.markdown("**SOIL MOISTURE — ERA5-LAND**")
+    ma, mb = st.columns(2)
+    ma.metric("0–7 cm (surface)",    f"{sm_07_c:.3f} m³/m³",  f"{sm_07_pct:.1f}% sat")
+    mb.metric("7–28 cm (root zone)", f"{sm_728_c:.3f} m³/m³", f"{sm_728_pct:.1f}% sat")
+
+    mc, md = st.columns(2)
+    mc.metric("Stored Water",    f'{soil_in:.2f}"',  "0–35 cm profile")
+    md.metric("Saturation",      f"{soil_sat:.1f}%", "of pore capacity")
+
+    st.divider()
+
+    st.markdown("**STREAM MODEL — SCS-CN / RATIONAL**")
+    me, mf = st.columns(2)
+    me.metric("Rain 24h / QPF",  f'{rain_24h:.2f}" + {qpf_24h:.2f}"')
+    mf.metric("Rain 7-Day",      f'{rain_7d:.2f}"')
+
+    mg, mh = st.columns(2)
+    mg.metric("Modeled Discharge", f"{modeled_flow:.1f} cfs")
+    mh.metric("Modeled Depth",     f"{modeled_depth:.2f} ft")
+
+    st.caption(f"CN={WS_CN_II} base | Tc={WS_TC_HRS}h | n={WS_MANN_N} | {WS_AREA_ACRES:,} ac watershed")
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ROW 3: 7-DAY FLOOD OUTLOOK
