@@ -12,7 +12,10 @@ Post-deployment: K = Q_observed / Q_modeled calibrates both points independently
 
 Data sources:
   - Atmospheric:   Open-Meteo HRRR/GFS (real-time, no API key)
-  - Soil moisture: ECMWF ERA5-Land volumetric (0-7cm, 7-28cm) via Open-Meteo archive
+  - Soil moisture: 3-SOURCE ENSEMBLE:
+                     ERA5-Land volumetric (0-7cm, 7-28cm) — physics baseline, ~5 day lag
+                     HRRR Antecedent Precip Index (5-day) — zero lag, real-time
+                     USDA Drought Monitor (Jackson Co. FIPS 37099) — weekly expert synthesis
   - QPF / PoP:     NWS GSP Gridpoint API (Greenville-Spartanburg WFO)
   - Radar:         NEXRAD WSR-88D KGSP — same feed used by NWS operations and Jackson Co. EM
 
@@ -231,7 +234,7 @@ def fetch_precip_history():
         precip_h = r["hourly"]["precipitation"]
         snow_h   = r["hourly"].get("snowfall", [0] * len(times))
 
-        t14d = t7d = t24h = snow7d = 0.0
+        t14d = t7d = t5d = t24h = snow7d = 0.0
         for i, t in enumerate(times):
             try:
                 dt = datetime.fromisoformat(t)
@@ -244,11 +247,12 @@ def fetch_precip_history():
             s = (snow_h[i] or 0.0) * 0.0393701   # cm → inch
             if age <= 14: t14d  += p
             if age <= 7:  t7d   += p; snow7d += s
+            if age <= 5:  t5d   += p
             if age <= 1:  t24h  += p
 
-        return round(t14d, 2), round(t7d, 2), round(snow7d, 2), round(t24h, 2), True
+        return round(t14d, 2), round(t7d, 2), round(snow7d, 2), round(t24h, 2), round(t5d, 2), True
     except Exception:
-        return 2.10, 0.50, 0.00, 0.00, False
+        return 2.10, 0.50, 0.00, 0.00, 0.50, False
 
 
 @st.cache_data(ttl=3600)
@@ -288,27 +292,167 @@ def fetch_era5_soil_moisture():
         return None, None, None, False
 
 
+@st.cache_data(ttl=3600)
+def fetch_usdm_drought():
+    """
+    USDA US Drought Monitor — Jackson County NC (FIPS 37099).
+    Returns dominant drought level integer:
+      -1 = API unavailable   0 = No drought
+       1 = D0 Abnormally Dry  2 = D1 Moderate   3 = D2 Severe
+       4 = D3 Extreme         5 = D4 Exceptional
+    Uses NC DMAC rule: highest category covering ≥25% of county.
+    Updated weekly (Thursdays). Source: droughtmonitor.unl.edu
+    """
+    try:
+        end_dt   = date.today()
+        start_dt = date.today() - timedelta(days=21)  # last 3 weeks to ensure coverage
+        r = requests.get(
+            "https://usdmdataservices.unl.edu/api/CountyStatistics/"
+            "GetDroughtSeverityStatisticsByAreaPercent",
+            params={
+                "aoi":            "37099",
+                "startdate":      start_dt.strftime("%m/%d/%Y"),
+                "enddate":        end_dt.strftime("%m/%d/%Y"),
+                "statisticsType": "1",
+            },
+            timeout=10
+        ).json()
+
+        if not r:
+            return -1, "NO DATA", "---"
+
+        # Take most recent record (last entry)
+        rec = r[-1]
+        map_date = rec.get("MapDate", "")[:10]
+
+        # NC DMAC rule: highest Dx covering ≥25% of county area
+        # USDM cumulative: D1 value = % area in D1 OR WORSE
+        for level, key in [(5, "D4"), (4, "D3"), (3, "D2"), (2, "D1"), (1, "D0")]:
+            if float(rec.get(key, 0) or 0) >= 25.0:
+                labels = {1: "D0 ABNORMALLY DRY", 2: "D1 MODERATE DROUGHT",
+                          3: "D2 SEVERE DROUGHT", 4: "D3 EXTREME DROUGHT",
+                          5: "D4 EXCEPTIONAL DROUGHT"}
+                return level, labels[level], map_date
+
+        return 0, "NO DROUGHT", map_date
+
+    except Exception:
+        return -1, "API UNAVAILABLE", "---"
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  4. HYDRO-MODELING
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def calc_soil_saturation(sm_07, sm_728):
-    """
-    Convert ERA5-Land volumetric soil moisture to saturation % and stored water.
-    Weights: surface 55% (most flood-relevant), root zone 45%.
-    Layer depths: 0-7cm = 2.756", 7-28cm = 8.268"
-    ERA5-Land can exceed theoretical porosity — values are clamped.
-    """
+def calc_era5_sat_pct(sm_07, sm_728):
+    """ERA5-Land volumetric → saturation %. Clamp to valid range."""
     sm_07  = min(sm_07,  SOIL_POROSITY)
     sm_728 = min(sm_728, SOIL_POROSITY)
-    sm_avg = (sm_07 * 0.55) + (sm_728 * 0.45)
-    sm_avg = min(sm_avg, SOIL_POROSITY)
-
+    sm_avg = min((sm_07 * 0.55) + (sm_728 * 0.45), SOIL_POROSITY)
     sat_range = SOIL_POROSITY - SOIL_WILT_PT
-    sat_pct   = round(min(100.0, max(0.0, (sm_avg - SOIL_WILT_PT) / sat_range * 100)), 2)
-    stored_in = round((sm_07 * 2.756) + (sm_728 * 8.268), 2)
-    color     = "#FF3333" if sat_pct > 85 else "#FF8800" if sat_pct > 70 else "#FFD700" if sat_pct > 50 else "#00FF9C"
-    return sat_pct, stored_in, color
+    return round(min(100.0, max(0.0, (sm_avg - SOIL_WILT_PT) / sat_range * 100)), 2)
+
+
+def calc_api_sat_pct(rain_5d):
+    """
+    Antecedent Precipitation Index → soil saturation %.
+    Uses SCS AMC thresholds for humid Appalachian climate (growing season).
+    SCS AMC-I: < 2.1"  → dry   (~10-35%)
+    SCS AMC-II: 2.1-2.8" → normal (~35-60%)
+    SCS AMC-III: > 2.8" → wet   (~60-90%)
+    No lag — directly from HRRR hourly precip.
+    """
+    a = min(float(rain_5d), 5.0)
+    if a < 0.30:   sat = 10.0 + a * 33.3
+    elif a < 1.00: sat = 20.0 + (a - 0.30) / 0.70 * 18.0
+    elif a < 2.10: sat = 38.0 + (a - 1.00) / 1.10 * 17.0
+    elif a < 2.80: sat = 55.0 + (a - 2.10) / 0.70 * 13.0
+    else:          sat = 68.0 + (a - 2.80) / 2.20 * 22.0
+    return round(min(90.0, max(5.0, sat)), 1)
+
+
+# USDM drought level → expert-implied soil saturation anchor (%)
+# Based on NDMC percentile thresholds (D0=20th pct, D1=10th, D2=5th, etc.)
+_USDM_IMPLIED_SAT = {1: 55.0, 2: 40.0, 3: 27.0, 4: 17.0, 5: 8.0}
+
+# USDM level → hard ceiling on final sat % (can't be wetter than drought implies)
+_USDM_CEILING = {0: 100, 1: 65, 2: 50, 3: 35, 4: 22, 5: 12}
+
+
+def calc_soil_saturation_ensemble(sm_07, sm_728, sm_ok, rain_5d, usdm_level):
+    """
+    Three-source soil saturation ensemble (pre-sensor best estimate).
+
+    Sources:
+      ERA5-Land  — physics reanalysis, ~5 day lag, can drift post-Helene
+      API        — HRRR antecedent precip index, zero lag, no deep memory
+      USDM       — expert synthesis (40-50 indicators), weekly, authoritative
+                   for drought conditions; Jackson Co. NC FIPS 37099
+
+    Blending strategy:
+      • No drought (usdm ≤ 0): ERA5 35% + API 65% (API more current)
+      • D0 drought    (usdm=1): ERA5 20% + API 50% + USDM 30%
+      • D1 drought    (usdm=2): ERA5 15% + API 40% + USDM 45%
+      • D2+ drought   (usdm≥3): ERA5 10% + API 30% + USDM 60%
+    USDM hard ceiling applied after blend.
+    If ERA5 unavailable, its weight shifts to API.
+    """
+    api_pct  = calc_api_sat_pct(rain_5d)
+    era5_pct = calc_era5_sat_pct(sm_07, sm_728) if (sm_ok and sm_07 is not None) else None
+
+    usdm_pct = _USDM_IMPLIED_SAT.get(usdm_level)
+
+    if usdm_level <= 0:
+        w_era5, w_api, w_usdm = 0.35, 0.65, 0.0
+    elif usdm_level == 1:
+        w_era5, w_api, w_usdm = 0.20, 0.50, 0.30
+    elif usdm_level == 2:
+        w_era5, w_api, w_usdm = 0.15, 0.40, 0.45
+    else:
+        w_era5, w_api, w_usdm = 0.10, 0.30, 0.60
+
+    # Redistribute ERA5 weight to API if unavailable
+    if era5_pct is None:
+        w_api   += w_era5
+        w_era5   = 0.0
+        era5_use = api_pct   # placeholder for display
+    else:
+        era5_use = era5_pct
+
+    # Redistribute USDM weight to API if no USDM drought data
+    if usdm_pct is None:
+        w_api   += w_usdm
+        w_usdm   = 0.0
+        usdm_use = api_pct
+    else:
+        usdm_use = usdm_pct
+
+    sat_pct = (era5_use * w_era5) + (api_pct * w_api) + (usdm_use * w_usdm)
+
+    # Apply USDM hard ceiling
+    ceiling = _USDM_CEILING.get(max(0, usdm_level), 100)
+    sat_pct = min(sat_pct, ceiling)
+    sat_pct = round(min(100.0, max(1.0, sat_pct)), 1)
+
+    # Stored water from ERA5 layers (or estimate from sat_pct if unavailable)
+    if sm_ok and sm_07 is not None:
+        sm_07c     = min(sm_07,  SOIL_POROSITY)
+        sm_728c    = min(sm_728, SOIL_POROSITY)
+        stored_in  = round((sm_07c * 2.756) + (sm_728c * 8.268), 2)
+    else:
+        stored_in  = round((sat_pct / 100.0) * (SOIL_POROSITY * 11.024), 2)
+
+    color = "#FF3333" if sat_pct > 85 else "#FF8800" if sat_pct > 70 else "#FFD700" if sat_pct > 50 else "#00FF9C"
+
+    sources = {
+        "era5_pct":  round(era5_use, 1) if era5_pct is not None else None,
+        "api_pct":   api_pct,
+        "usdm_pct":  usdm_pct,
+        "w_era5":    round(w_era5, 2),
+        "w_api":     round(w_api, 2),
+        "w_usdm":    round(w_usdm, 2),
+    }
+    return sat_pct, stored_in, color, sources
 
 
 def model_stream(soil_sat_pct, rain_24h, qpf_24h, rain_7d,
@@ -483,26 +627,29 @@ font-family:'Rajdhani',sans-serif;color:white;">
 #  6. DATA EXECUTION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-noaa                                    = fetch_openmeteo_current()
-forecast, fc_ok, fc_err                 = fetch_nws_forecast()
-rain_14d, rain_7d, snow_7d, rain_24h, _ = fetch_precip_history()
-sm_07, sm_728, sm_ts, sm_ok             = fetch_era5_soil_moisture()
+noaa                                              = fetch_openmeteo_current()
+forecast, fc_ok, fc_err                           = fetch_nws_forecast()
+rain_14d, rain_7d, snow_7d, rain_24h, rain_5d, _ = fetch_precip_history()
+sm_07, sm_728, sm_ts, sm_ok                       = fetch_era5_soil_moisture()
+usdm_level, usdm_label, usdm_date                 = fetch_usdm_drought()
 
-# Soil saturation — ERA5-Land preferred, precip proxy fallback
+# ── Soil saturation — 3-source ensemble ──────────────────────────────────────
+soil_sat, soil_stored, soil_color, sm_sources = calc_soil_saturation_ensemble(
+    sm_07, sm_728, sm_ok, rain_5d, usdm_level
+)
+
+# ERA5 layer percentages for display card (if available)
 if sm_ok and sm_07 is not None:
-    soil_sat, soil_stored, soil_color = calc_soil_saturation(sm_07, sm_728)
-    sm_07_c   = min(sm_07,  SOIL_POROSITY)
-    sm_728_c  = min(sm_728, SOIL_POROSITY)
-    sm_range  = SOIL_POROSITY - SOIL_WILT_PT
+    sm_range   = SOIL_POROSITY - SOIL_WILT_PT
+    sm_07_c    = min(sm_07,  SOIL_POROSITY)
+    sm_728_c   = min(sm_728, SOIL_POROSITY)
     sm_07_pct  = round(max(0, min(100, (sm_07_c  - SOIL_WILT_PT) / sm_range * 100)), 1)
     sm_728_pct = round(max(0, min(100, (sm_728_c - SOIL_WILT_PT) / sm_range * 100)), 1)
     sm_ts_str  = sm_ts[:13].replace("T", " ") + " UTC" if sm_ts else "---"
 else:
-    _proxy = min(SOIL_POROSITY, SOIL_WILT_PT + (min(rain_14d, 14.0) / 14.0) * (SOIL_POROSITY - SOIL_WILT_PT))
-    soil_sat, soil_stored, soil_color = calc_soil_saturation(_proxy, _proxy * 0.85)
     sm_07_c = sm_728_c = 0.0
     sm_07_pct = sm_728_pct = 0.0
-    sm_ts_str = "PROXY MODE"
+    sm_ts_str = "ERA5 UNAVAILABLE"
 
 # NWS forecast values
 qpf_24h = forecast[0]["qpf"] if forecast else 0.0
@@ -680,16 +827,50 @@ with l2:
         "RATIONAL METHOD"
     ), height=230)
 with l3:
-    st.markdown('<div style="transform:scale(0.64); transform-origin:top left; width:156%;">', unsafe_allow_html=True)
-    st.markdown("**SOIL MOISTURE — ECMWF ERA5-LAND**")
-    la, lb = st.columns(2)
-    la.metric("0–7 cm (surface)",    f"{sm_07_c:.3f} m³/m³",  f"{sm_07_pct:.1f}% sat")
-    lb.metric("7–28 cm (root zone)", f"{sm_728_c:.3f} m³/m³", f"{sm_728_pct:.1f}% sat")
-    lc, ld = st.columns(2)
-    lc.metric("Stored Water",        f'{soil_stored:.2f}"',    "0–35 cm profile")
-    ld.metric("Saturation",          f"{soil_sat:.1f}%",       "of pore capacity")
-    st.caption(f"ECMWF ERA5-Land  |  Valid: {sm_ts_str}")
-    st.markdown('</div>', unsafe_allow_html=True)
+    # Build source status strings
+    _era5_str  = f"{sm_sources['era5_pct']:.0f}%" if sm_sources['era5_pct'] is not None else "UNAVAIL"
+    _api_str   = f"{sm_sources['api_pct']:.0f}%"
+    _usdm_str  = f"{sm_sources['usdm_pct']:.0f}%" if sm_sources['usdm_pct'] is not None else "N/A"
+    _usdm_clr  = "#FF8800" if usdm_level >= 3 else "#FFD700" if usdm_level == 2 else "#FFFF00" if usdm_level == 1 else "#00FF9C"
+    _usdm_tag  = usdm_label if usdm_level >= 0 else "NO DATA"
+    _era5_active = "✓" if sm_ok and sm_07 is not None else "✗"
+    _usdm_active = "✓" if usdm_level >= 0 else "✗"
+    st.markdown(f"""
+<div style="background:rgba(0,50,120,0.18); border:1px solid rgba(0,119,255,0.22);
+            border-radius:9px; padding:14px 16px; font-family:'Share Tech Mono',monospace;">
+  <div style="font-size:0.72em; color:#0077FF; letter-spacing:3px; margin-bottom:10px;
+              border-bottom:1px solid rgba(0,119,255,0.2); padding-bottom:6px;">
+    SOIL SATURATION — 3-SOURCE ENSEMBLE
+  </div>
+  <div style="font-size:2.5em; font-weight:700; color:{soil_color}; text-align:center;
+              margin:6px 0 4px;">{soil_sat:.1f}%</div>
+  <div style="font-size:0.7em; color:#5AACD0; text-align:center; margin-bottom:12px;">
+    stored: {soil_stored:.2f}&quot; &nbsp;|&nbsp; pore capacity
+  </div>
+  <div style="display:grid; grid-template-columns:auto 1fr auto; gap:3px 8px;
+              font-size:0.68em; align-items:center;">
+    <span style="color:#3A8050;">{_era5_active}</span>
+    <span style="color:#7AACCC;">ERA5-Land &nbsp;<span style="color:#2A5070;font-size:0.85em;">w={sm_sources['w_era5']:.0%}</span></span>
+    <span style="color:#AACCDD;">{_era5_str}</span>
+    <span style="color:#3A8050;">✓</span>
+    <span style="color:#7AACCC;">API/HRRR 5-day &nbsp;<span style="color:#2A5070;font-size:0.85em;">w={sm_sources['w_api']:.0%}</span></span>
+    <span style="color:#AACCDD;">{_api_str}</span>
+    <span style="color:#3A8050;">{_usdm_active}</span>
+    <span style="color:#7AACCC;">USDM &nbsp;<span style="color:#2A5070;font-size:0.85em;">w={sm_sources['w_usdm']:.0%}</span></span>
+    <span style="color:#AACCDD;">{_usdm_str}</span>
+  </div>
+  <div style="margin-top:10px; padding-top:7px; border-top:1px solid rgba(0,80,160,0.25);
+              font-size:0.65em; color:{_usdm_clr}; letter-spacing:1px;">
+    USDM: {_usdm_tag}
+  </div>
+  <div style="font-size:0.60em; color:#2A4A60; margin-top:3px;">
+    Jackson Co. NC (FIPS 37099) &nbsp;|&nbsp; {usdm_date if usdm_date != "---" else "no date"}
+  </div>
+  <div style="font-size:0.60em; color:#2A4A60; margin-top:1px;">
+    ERA5 valid: {sm_ts_str}
+  </div>
+</div>
+""", unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 
@@ -750,7 +931,8 @@ st.markdown(f"""
 </div>
 <div style="font-family:'Share Tech Mono',monospace; font-size:0.68em; color:#2A5070;
             text-align:center; margin-top:6px; letter-spacing:1px;">
-  MODEL: SCS-CN + RATIONAL METHOD + MANNING'S RATING CURVE &middot; ERA5-LAND SOIL MOISTURE &middot;
+  MODEL: SCS-CN + RATIONAL METHOD + MANNING'S RATING CURVE &middot;
+  SOIL: ERA5-LAND + HRRR API + USDM ENSEMBLE &middot;
   CALIBRATION: K = Q<sub>obs</sub>/Q<sub>mod</sub> POST-SENSOR DEPLOYMENT
 </div>
 """, unsafe_allow_html=True)
