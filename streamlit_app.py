@@ -14,7 +14,7 @@ Hydrologic engine: SCS TR-55 Type II peak flow (NRCS 1986)
   distinct storm responses, especially for fast convective events vs slow frontal.
 
 Hydraulic geometry baseline — ECOREGION 66 BLUE RIDGE COMPOSITE CURVES:
-  Source: Harman et al. (2000) NC Mountain Streams + SCDNR Ecoregion 66 (May 2020)
+  Source: Henson et al. (2000) NC Mountain Streams + SCDNR Ecoregion 66 (May 2020)
   50 stable reference reaches across Southern Blue Ridge physiographic province.
   Regression forms:  Qbkf = 35.0 × DA^0.850  (cfs, DA in mi²)
                      Wbkf = 12.5 × DA^0.460  (ft)
@@ -142,7 +142,7 @@ FLOOD_TRAVEL_MIN   = 65      # Flood wave travel time UPPER → NCCAT (min, pre-
 # ═══════════════════════════════════════════════════════════════════════════════
 #  2.5  ECOREGION 66 BLUE RIDGE REGIONAL CURVES
 #
-#  Source: Harman et al. (2000) "Bankfull Regional Curves for NC Mountain Streams"
+#  Source: Henson et al. (2000) "Bankfull Regional Curves for NC Mountain Streams"
 #          AWRA Conf. Water Resources in Extreme Environments, Anchorage AK.
 #          Composite extended by SCDNR Ecoregion 66 Blue Ridge Summary (May 2020),
 #          50 stable reference reaches across the Southern Blue Ridge province.
@@ -157,7 +157,7 @@ FLOOD_TRAVEL_MIN   = 65      # Flood wave travel time UPPER → NCCAT (min, pre-
 #    For B/C type cobble mountain streams, bankfull STAGE (gauge reading from
 #    thalweg datum) ≈ Dbkf_mean × 1.35.  This factor reflects the asymmetric
 #    cross-section shape of riffle pools where thalweg depth exceeds mean depth.
-#    Range in literature: 1.2–1.6 (Rosgen 1996; Harman et al. 2000).
+#    Range in literature: 1.2–1.6 (Rosgen 1996; Henson et al. 2000).
 #
 #  Important caveats:
 #    • Individual reach scatter: ±40–60% around the composite line.
@@ -909,7 +909,7 @@ st.markdown(f"""
   <div style="font-family:'Share Tech Mono',monospace; font-size:0.68em;
               color:#3A6A8A; margin-top:10px; letter-spacing:1px;">
     EVALUATED FACTORS: Soil Saturation &middot; 24hr Rainfall Forecast &middot; Probability of Precipitation
-    &nbsp;|&nbsp; BANKFULL REF: Ecoregion 66 Blue Ridge Composite (Harman et al. 2000 / SCDNR 2020)
+    &nbsp;|&nbsp; BANKFULL REF: Ecoregion 66 Blue Ridge Composite (Henson et al. 2000 / SCDNR 2020)
   </div>
 </div>""", unsafe_allow_html=True)
 
@@ -967,7 +967,7 @@ with u3:
     st.markdown("**UPPER SUB-WATERSHED PARAMETERS — ECOREGION 66 ANCHORED**")
     ua, ub = st.columns(2)
     ua.metric("Drainage Area",    f"{UP_AREA_ACRES:,} ac ({UP_DA_SQMI:.2f} mi²)", "~40% of total")
-    ub.metric("Bankfull Q (E66)", f"{UP_BANKFULL_Q:.0f} cfs",                     "Harman 2000 / SCDNR 2020")
+    ub.metric("Bankfull Q (E66)", f"{UP_BANKFULL_Q:.0f} cfs",                     "Henson 2000 / SCDNR 2020")
     uc, ud = st.columns(2)
     uc.metric("Bankfull Stage",   f"{UP_BANKFULL:.2f} ft",                         "E66 Dbkf_mean × 1.35")
     ud.metric("Width (E66)",      f"{UP_WIDTH_FT:.1f} ft",                          "Bankfull channel width")
@@ -1065,7 +1065,7 @@ with l3:
               font-size:0.62em; color:#1E5070; letter-spacing:1px; line-height:1.5;">
     E66 BANKFULL: {LO_BANKFULL_Q:.0f} cfs &nbsp;|&nbsp; stage {LO_BANKFULL:.2f} ft
     &nbsp;|&nbsp; W={LO_WIDTH_FT:.0f} ft &nbsp;|&nbsp; A={LO_RATING_A:.1f}·D^{LO_RATING_B}
-    <br>DA={LO_DA_SQMI:.2f} mi² &nbsp;|&nbsp; Harman 2000 / SCDNR E66 2020
+    <br>DA={LO_DA_SQMI:.2f} mi² &nbsp;|&nbsp; Henson 2000 / SCDNR E66 2020
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1082,7 +1082,7 @@ with st.expander("▶  ECOREGION 66 BLUE RIDGE REGIONAL CURVE DERIVATION", expan
     ECOREGION 66 (SOUTHERN BLUE RIDGE) COMPOSITE CURVES — DERIVATION AUDIT
   </div>
   <div style="font-size:0.70em; color:#3A7090; margin-bottom:12px; line-height:1.7;">
-    Source: Harman et al. (2000) NC Mountain Streams + SCDNR Ecoregion 66 Blue Ridge Summary (May 2020)<br>
+    Source: Henson et al. (2000) NC Mountain Streams + SCDNR Ecoregion 66 Blue Ridge Summary (May 2020)<br>
     50 stable reference reaches across Southern Blue Ridge physiographic province<br>
     Regression forms:
     &nbsp; Q<sub>bkf</sub> = 35.0 × DA<sup>0.850</sup> (cfs, R²≈0.87)
