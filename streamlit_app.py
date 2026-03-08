@@ -138,24 +138,59 @@ def fetch_nws_forecast():
         return [], False, str(e)
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=1800)
 def fetch_30d_precip():
+    """
+    Uses Open-Meteo HRRR/GFS hourly precip — no ERA5 latency.
+    past_days=14 + forecast_days=1 gives current-hour accuracy.
+    """
     try:
         r = requests.get(
             "https://api.open-meteo.com/v1/forecast",
-            params={"latitude": LAT, "longitude": LON,
-                    "daily": "precipitation_sum,snowfall_sum", "past_days": 14,
-                    "forecast_days": 0, "precipitation_unit": "inch"},
+            params={
+                "latitude":           LAT,
+                "longitude":          LON,
+                "hourly":             "precipitation,snowfall",
+                "precipitation_unit": "inch",
+                "wind_speed_unit":    "mph",
+                "past_days":          14,
+                "forecast_days":      1,
+                "models":             "best_match",
+            },
             timeout=10
         ).json()
-        precip = r["daily"]["precipitation_sum"]
-        snow   = r["daily"].get("snowfall_sum", [0]*30)
-        total_14d = round(sum(precip), 2)
-        total_7d  = round(sum(precip[-7:]), 2)
-        snow_7d   = round(sum(snow[-7:]) * 0.393701, 2)  # cm -> inches
-        return total_14d, total_7d, snow_7d, True
-    except:
-        return 2.10, 0.50, 0.00, False
+
+        now        = datetime.utcnow()
+        times      = r["hourly"]["time"]
+        precip_h   = r["hourly"]["precipitation"]
+        snow_h     = r["hourly"].get("snowfall", [0]*len(times))
+
+        total_14d = 0.0
+        total_7d  = 0.0
+        total_24h = 0.0
+        snow_7d   = 0.0
+
+        for i, t in enumerate(times):
+            try:
+                dt = datetime.fromisoformat(t)
+            except:
+                continue
+            age_days = (now - dt).total_seconds() / 86400
+            if age_days < 0:        # skip future hours
+                continue
+            p = precip_h[i] or 0.0
+            s = (snow_h[i] or 0.0) * 0.0393701  # cm -> inch
+            if age_days <= 14:
+                total_14d += p
+            if age_days <= 7:
+                total_7d  += p
+                snow_7d   += s
+            if age_days <= 1:
+                total_24h += p
+
+        return round(total_14d,2), round(total_7d,2), round(snow_7d,2), round(total_24h,2), True
+    except Exception as e:
+        return 2.10, 0.50, 0.00, 0.00, False
 
 
 
@@ -278,7 +313,7 @@ font-family:'Rajdhani',sans-serif;color:white;">
 
 noaa                    = fetch_openmeteo_current()
 forecast, fc_ok, fc_err = fetch_nws_forecast()
-rain_30d, rain_7d, snow_7d, prcp_ok = fetch_30d_precip()
+rain_30d, rain_7d, snow_7d, rain_24h, prcp_ok = fetch_30d_precip()
 soil_in, soil_sat, soil_color = get_soil_model(rain_30d)
 
 qpf_24h    = forecast[0]["qpf"] if forecast else 0.0
@@ -344,7 +379,7 @@ c1, c2, c3, c4, c5 = st.columns(5)
 with c1: st.plotly_chart(make_dial(noaa["wind"],  "WIND SPEED",      0,  50,  " mph",  "#5AC8FA", src="K24A METAR"), use_container_width=True)
 with c2: st.plotly_chart(make_dial(noaa["hum"],   "HUMIDITY",        0, 100,  "%",     "#0077FF", src="K24A METAR"), use_container_width=True)
 with c3: st.plotly_chart(make_dial(noaa["temp"],  "TEMPERATURE",     0, 110,  " F",    "#FF3333", src="OPEN-METEO"), use_container_width=True)
-with c4: st.plotly_chart(make_dial(noaa["precip"], "RAIN NOW", 0, 10, '"',  "#0077FF", sub="Hourly Precipitation", src="OPEN-METEO"), use_container_width=True)
+with c4: st.plotly_chart(make_dial(rain_24h, "RAIN (24H)", 0, 10, '"',  "#0077FF", sub="24-Hour Accumulation", src="OPEN-METEO HRRR"), use_container_width=True)
 with c5: st.plotly_chart(make_dial(soil_sat,      "SOIL SATURATION", 0, 100,  "%",     "#0077FF", sub=f'{soil_in:.2f}" Stored', src="OPEN-METEO"), use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
@@ -377,7 +412,7 @@ with h3:
 <div style="background:rgba(0,80,160,0.10); border:1px solid #0077FF; border-radius:8px;
             padding:20px; font-family:'Share Tech Mono',monospace;">
   <div style="color:#0077FF; letter-spacing:1px; font-size:0.85em;">
-    SOIL MOISTURE MODEL (30-DAY ACCUMULATED)
+    SOIL MOISTURE MODEL (14-DAY / HRRR)
   </div>
   <div style="font-size:1.4em; font-weight:700; color:{soil_color}; margin:10px 0;">
     {soil_in:.2f} INCHES STORED
