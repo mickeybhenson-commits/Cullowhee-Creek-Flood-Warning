@@ -217,7 +217,7 @@ def compute_flood_threat(soil_sat, qpf_24h, pop_24h):
 
 def threat_meta(score):
     if score < 25: return "NORMAL",    "#00FF9C", "rgba(0,255,156,0.07)"
-    if score < 45: return "ELEVATED",  "#AAFF00", "rgba(170,255,0,0.07)"
+    if score < 45: return "ELEVATED",  "#FFFF00", "rgba(255,255,0,0.09)"
     if score < 65: return "WATCH",     "#FFD700", "rgba(255,215,0,0.09)"
     if score < 82: return "WARNING",   "#FF8800", "rgba(255,136,0,0.11)"
     return               "EMERGENCY",  "#FF3333", "rgba(255,51,51,0.14)"
@@ -436,7 +436,7 @@ elif forecast:
     pcols = st.columns(7)
     for i, d in enumerate(forecast):
         risk      = min(100.0, round((soil_sat * 0.35) + (d["pop"] * 0.35) + (d["qpf"] * 20), 2))
-        color     = "#00FF9C" if risk < 30 else "#AAFF00" if risk < 50 else "#FFD700" if risk < 65 else "#FF8800" if risk < 80 else "#FF3333"
+        color     = "#00FF9C" if risk < 30 else "#FFFF00" if risk < 50 else "#FFD700" if risk < 65 else "#FF8800" if risk < 80 else "#FF3333"
         icon      = nws_icon(d["icon_txt"])
         temp_str  = f"{d['temp']:.2f}"
         qpf_str   = f"{d['qpf']:.2f}"
