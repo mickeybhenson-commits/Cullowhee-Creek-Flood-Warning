@@ -597,6 +597,7 @@ with h3:
         sm_07_pct, sm_728_pct = 0.0, 0.0
         src_line = "ERA5-LAND unavailable — proxy mode"
 
+    st.markdown('<div style="transform:scale(0.80); transform-origin:top left; width:125%;">', unsafe_allow_html=True)
     st.markdown("**SOIL MOISTURE — ERA5-LAND**")
     ma, mb = st.columns(2)
     ma.metric("0–7 cm (surface)",    f"{sm_07_c:.3f} m³/m³",  f"{sm_07_pct:.1f}% sat")
@@ -606,18 +607,8 @@ with h3:
     mc.metric("Stored Water",    f'{soil_in:.2f}"',  "0–35 cm profile")
     md.metric("Saturation",      f"{soil_sat:.1f}%", "of pore capacity")
 
-    st.divider()
-
-    st.markdown("**STREAM MODEL — SCS-CN / RATIONAL**")
-    me, mf = st.columns(2)
-    me.metric("Rain 24h / QPF",  f'{rain_24h:.2f}" + {qpf_24h:.2f}"')
-    mf.metric("Rain 7-Day",      f'{rain_7d:.2f}"')
-
-    mg, mh = st.columns(2)
-    mg.metric("Modeled Discharge", f"{modeled_flow:.1f} cfs")
-    mh.metric("Modeled Depth",     f"{modeled_depth:.2f} ft")
-
-    st.caption(f"CN={WS_CN_II} base | Tc={WS_TC_HRS}h | n={WS_MANN_N} | {WS_AREA_ACRES:,} ac watershed")
+    st.caption(f"ECMWF ERA5-Land  |  Valid: {sm_ts_label if sm_ok and sm_07 is not None else 'proxy mode'}")
+    st.markdown('</div>', unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ROW 3: 7-DAY FLOOD OUTLOOK
