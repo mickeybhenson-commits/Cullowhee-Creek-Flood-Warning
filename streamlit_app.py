@@ -193,19 +193,87 @@ def fetch_30d_precip():
         return 2.10, 0.50, 0.00, 0.00, False
 
 
+@st.cache_data(ttl=3600)
+def fetch_era5_soil_moisture():
+    """
+    ERA5-Land volumetric soil moisture — best available model for pre-sensor operations.
+    Two depth layers relevant to surface runoff / infiltration:
+      0-7cm  : surface response layer  (fastest response to rainfall)
+      7-28cm : root zone / vadose zone  (controls longer-term saturation state)
+    ERA5-Land lag: ~5 days. We fetch last 14 days and take most recent valid data.
+    """
+    try:
+        from datetime import date, timedelta
+        end_dt   = date.today()
+        start_dt = date.today() - timedelta(days=14)
+        r = requests.get(
+            "https://archive-api.open-meteo.com/v1/archive",
+            params={
+                "latitude":   LAT,
+                "longitude":  LON,
+                "hourly":     "soil_moisture_0_to_7cm,soil_moisture_7_to_28cm",
+                "models":     "era5_land",
+                "start_date": start_dt.strftime("%Y-%m-%d"),
+                "end_date":   end_dt.strftime("%Y-%m-%d"),
+            },
+            timeout=15
+        ).json()
+
+        times  = r["hourly"]["time"]
+        sm_07  = r["hourly"]["soil_moisture_0_to_7cm"]
+        sm_728 = r["hourly"]["soil_moisture_7_to_28cm"]
+
+        # Walk backwards to find most recent non-null pair
+        latest_07, latest_728, latest_ts = None, None, None
+        for i in range(len(times) - 1, -1, -1):
+            if sm_07[i] is not None and sm_728[i] is not None:
+                latest_07  = sm_07[i]
+                latest_728 = sm_728[i]
+                latest_ts  = times[i]
+                break
+
+        if latest_07 is None:
+            return None, None, None, False
+
+        return round(latest_07, 4), round(latest_728, 4), latest_ts, True
+
+    except Exception:
+        return None, None, None, False
+
+
 
 
 # ─────────────────────────────────────────────
 #  3. HYDRO-MODELING
 # ─────────────────────────────────────────────
 
-def get_soil_model(total_30d):
-    MAX_CAP = 2.66
-    ET_LOSS = 0.06 * 14
-    stored  = max(0.00, min(MAX_CAP, total_30d - ET_LOSS))
-    sat_pct = (stored / MAX_CAP) * 100
-    color   = "#FF3333" if sat_pct > 85 else "#FFD700" if sat_pct > 60 else "#00FF9C"
-    return round(stored, 2), round(sat_pct, 2), color
+# ERA5-Land / Ultisol soil constants for WNC (Evard-Cowee-Plott series)
+# These match the loam soil type ERA5-Land assigns to this terrain class.
+SOIL_POROSITY  = 0.439   # m3/m3 — saturated (pore space)
+SOIL_FIELD_CAP = 0.286   # m3/m3 — field capacity (drains freely above this)
+SOIL_WILT_PT   = 0.151   # m3/m3 — permanent wilting point
+
+def get_soil_model(sm_07, sm_728):
+    """
+    Convert ERA5-Land volumetric soil moisture (m3/m3) to saturation % and
+    equivalent stored water inches for dashboard display.
+
+    Weighted average: surface 0-7cm gets 55% weight (most flood-relevant),
+    root zone 7-28cm gets 45% weight.
+
+    Stored water inches:
+      0-7cm  layer = 2.756 inches deep  -> stored = sm_07  * 2.756
+      7-28cm layer = 8.268 inches deep  -> stored = sm_728 * 8.268
+    """
+    RANGE = SOIL_POROSITY - SOIL_WILT_PT  # 0.288 m3/m3 = full available range
+
+    sm_avg  = (sm_07 * 0.55) + (sm_728 * 0.45)
+    sat_pct = min(100.0, max(0.0, (sm_avg - SOIL_WILT_PT) / RANGE * 100))
+
+    stored_in = (sm_07 * 2.756) + (sm_728 * 8.268)
+
+    color = "#FF3333" if sat_pct > 85 else "#FF8800" if sat_pct > 70 else "#FFD700" if sat_pct > 50 else "#00FF9C"
+    return round(stored_in, 2), round(sat_pct, 2), color
 
 
 def compute_flood_threat(soil_sat, qpf_24h, pop_24h):
@@ -314,7 +382,15 @@ font-family:'Rajdhani',sans-serif;color:white;">
 noaa                    = fetch_openmeteo_current()
 forecast, fc_ok, fc_err = fetch_nws_forecast()
 rain_30d, rain_7d, snow_7d, rain_24h, prcp_ok = fetch_30d_precip()
-soil_in, soil_sat, soil_color = get_soil_model(rain_30d)
+sm_07, sm_728, sm_ts, sm_ok = fetch_era5_soil_moisture()
+
+# ERA5-Land data preferred; proxy fallback if unavailable
+if sm_ok and sm_07 is not None:
+    soil_in, soil_sat, soil_color = get_soil_model(sm_07, sm_728)
+else:
+    _range    = SOIL_POROSITY - SOIL_WILT_PT
+    _sm_proxy = min(SOIL_POROSITY, SOIL_WILT_PT + (min(rain_30d, 14.0) / 14.0) * _range)
+    soil_in, soil_sat, soil_color = get_soil_model(_sm_proxy, _sm_proxy * 0.85)
 
 qpf_24h    = forecast[0]["qpf"] if forecast else 0.0
 pop_24h    = forecast[0]["pop"] if forecast else 0.0
@@ -380,7 +456,7 @@ with c1: st.plotly_chart(make_dial(noaa["wind"],  "WIND SPEED",      0,  50,  " 
 with c2: st.plotly_chart(make_dial(noaa["hum"],   "HUMIDITY",        0, 100,  "%",     "#0077FF", src="K24A METAR"), use_container_width=True)
 with c3: st.plotly_chart(make_dial(noaa["temp"],  "TEMPERATURE",     0, 110,  " F",    "#FF3333", src="OPEN-METEO"), use_container_width=True)
 with c4: st.plotly_chart(make_dial(rain_24h, "RAIN (24H)", 0, 10, '"',  "#0077FF", sub="24-Hour Accumulation", src="OPEN-METEO HRRR"), use_container_width=True)
-with c5: st.plotly_chart(make_dial(soil_sat,      "SOIL SATURATION", 0, 100,  "%",     "#0077FF", sub=f'{soil_in:.2f}" Stored', src="OPEN-METEO"), use_container_width=True)
+with c5: st.plotly_chart(make_dial(soil_sat, "SOIL SATURATION", 0, 100, "%", "#0077FF", sub=f'{soil_in:.2f}" Stored | ERA5-Land', src="ECMWF ERA5-LAND"), use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ROW 2: CULLOWHEE CREEK
@@ -407,23 +483,37 @@ with h2:
         f"Discharge: {st.session_state.flow:.2f} cfs", "NEMO SENSOR"
     ), height=230)
 with h3:
-    live_label = "LIVE" if prcp_ok else "CACHED FALLBACK"
+    if sm_ok and sm_07 is not None:
+        sm_src_label  = "ERA5-LAND"
+        sm_ts_label   = sm_ts[:13].replace("T", " ") + " UTC" if sm_ts else "---"
+        sm_07_pct     = round((sm_07  - SOIL_WILT_PT) / (SOIL_POROSITY - SOIL_WILT_PT) * 100, 1)
+        sm_728_pct    = round((sm_728 - SOIL_WILT_PT) / (SOIL_POROSITY - SOIL_WILT_PT) * 100, 1)
+        sm_fc_pct_07  = round(sm_07  / SOIL_FIELD_CAP * 100, 1)
+        sm_fc_pct_728 = round(sm_728 / SOIL_FIELD_CAP * 100, 1)
+        sm_data_rows  = f"""
+    0-7cm (surface):&nbsp;&nbsp;{sm_07:.3f} m&#179;/m&#179; &nbsp;({sm_07_pct:.1f}% sat)<br>
+    7-28cm (root zone): {sm_728:.3f} m&#179;/m&#179; &nbsp;({sm_728_pct:.1f}% sat)<br>
+    Field Capacity:&nbsp;&nbsp;&nbsp;&nbsp;{SOIL_FIELD_CAP:.3f} m&#179;/m&#179; (loam/Ultisol)<br>
+    Saturation Point:&nbsp;&nbsp;{SOIL_POROSITY:.3f} m&#179;/m&#179;<br>
+    Data Valid:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{sm_ts_label}<br>"""
+    else:
+        sm_src_label = "PROXY (ERA5 UNAVAIL)"
+        sm_data_rows = f"14d Precip: {rain_30d:.2f}&quot; (proxy input)<br>"
+
     st.markdown(f"""
 <div style="background:rgba(0,80,160,0.10); border:1px solid #0077FF; border-radius:8px;
             padding:20px; font-family:'Share Tech Mono',monospace;">
   <div style="color:#0077FF; letter-spacing:1px; font-size:0.85em;">
-    SOIL MOISTURE MODEL (14-DAY / HRRR)
+    SOIL MOISTURE &mdash; ERA5-LAND VOLUMETRIC
   </div>
   <div style="font-size:1.4em; font-weight:700; color:{soil_color}; margin:10px 0;">
-    {soil_in:.2f} INCHES STORED
+    {soil_sat:.1f}% SATURATED
   </div>
-  <div style="font-size:0.8em; color:#7AACCC; line-height:1.9;">
-    7-Day Rain: {rain_7d:.2f}&quot; &nbsp;|&nbsp; 7-Day Snow: {snow_7d:.2f}&quot;<br>
-    14d Precip: {rain_30d:.2f}&quot;<br>
-    Clay Loam Capacity: 2.66&quot;<br>
-    ET Extraction (14d Mar): 0.84&quot;<br>
-    <b>Infiltration: {soil_sat:.2f}% Capacity</b><br>
-    <span style="color:#1A5070;">SRC: OPEN-METEO ERA5 &middot; {live_label}</span>
+  <div style="font-size:0.78em; color:#7AACCC; line-height:2.0;">
+    {sm_data_rows}
+    Stored Water:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{soil_in:.2f}&quot; (0-35cm profile)<br>
+    <b>Flood Threat Weight: {soil_sat:.1f}% &times; 0.40</b><br>
+    <span style="color:#1A5070;">MODEL: ECMWF {sm_src_label} &middot; EVARD-COWEE-PLOTT SOILS</span>
   </div>
 </div>""", unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
