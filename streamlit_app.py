@@ -461,16 +461,14 @@ elif forecast:
 st.markdown('</div>', unsafe_allow_html=True)
 
 
-# ROW 5: LIVE RADAR
-st.markdown('<div class="panel"><div class="panel-title">LIVE REGIONAL RADAR &mdash; WESTERN NC</div>', unsafe_allow_html=True)
+# ROW 5: LIVE RADAR — NWS KGSP NEXRAD WSR-88D
+st.markdown('<div class="panel"><div class="panel-title">NEXRAD WSR-88D LIVE RADAR &mdash; KGSP GREENVILLE-SPARTANBURG (NWS OPERATIONAL)</div>', unsafe_allow_html=True)
 try:
     st.components.v1.html(
-        f'<iframe src="https://www.rainviewer.com/map.html?loc={LAT},{LON},9'
-        f'&oFa=0&oC=0&oU=0&oCS=1&oF=0&oAP=0&rmt=4&c=3&o=83&lm=0'
-        f'&layer=radar&sm=1&sn=1" '
-        f'width="100%" height="500" style="border-radius:10px; border:none;"></iframe>',
-        height=510,
+        '<iframe src="https://radar.weather.gov/station/KGSP/standard" '
+        'width="100%" height="580" style="border-radius:10px; border:none; background:#04090F;"></iframe>',
+        height=590,
     )
 except Exception:
-    st.error("Radar iframe unavailable — visit rainviewer.com directly for regional coverage.")
+    st.error("NWS radar unavailable — visit radar.weather.gov/station/KGSP directly.")
 st.markdown('</div>', unsafe_allow_html=True)
