@@ -253,6 +253,21 @@ SOIL_POROSITY  = 0.439   # m3/m3 — saturated (pore space)
 SOIL_FIELD_CAP = 0.286   # m3/m3 — field capacity (drains freely above this)
 SOIL_WILT_PT   = 0.151   # m3/m3 — permanent wilting point
 
+# ── Cullowhee Creek Watershed Parameters (NCCAT sensor point) ──────────────
+# Source: HUC-12 delineation, NLCD land cover, SSURGO soils, field estimates
+# All values flagged for calibration update upon sensor deployment.
+WS_AREA_ACRES = 6200        # ~25.1 km² drainage area to NCCAT gauge point
+WS_TC_HRS     = 2.5         # Time of concentration, Kirpich formula estimate (hr)
+WS_CN_II      = 68          # SCS Curve Number, AMC-II (forested Ultisol, ~20% impervious)
+WS_SLOPE      = 0.010       # Average channel slope ft/ft
+WS_WIDTH_FT   = 28.0        # Estimated bankfull channel width at NCCAT (ft)
+WS_MANN_N     = 0.045       # Manning's n, natural cobble/gravel mountain stream
+# Power-law rating curve Q = RATING_A * D^RATING_B (depth→discharge)
+# Derived from Manning's + trapezoidal cross-section; update with sensor data
+RATING_A      = 44.0        # discharge coefficient (cfs/ft^b)
+RATING_B      = 2.30        # depth exponent (typical 2.1–2.6 for WNC streams)
+BASEFLOW_CFS  = 9.0         # Estimated low-season baseflow at NCCAT (cfs)
+
 def get_soil_model(sm_07, sm_728):
     """
     Convert ERA5-Land volumetric soil moisture (m3/m3) to saturation % and
@@ -274,6 +289,60 @@ def get_soil_model(sm_07, sm_728):
 
     color = "#FF3333" if sat_pct > 85 else "#FF8800" if sat_pct > 70 else "#FFD700" if sat_pct > 50 else "#00FF9C"
     return round(stored_in, 2), round(sat_pct, 2), color
+
+
+def model_stream_conditions(soil_sat_pct, rain_24h, qpf_24h, rain_7d):
+    """
+    Cullowhee Creek depth and discharge model — pre-sensor operational estimate.
+
+    Method:
+      1. SCS-CN with AMC adjustment (soil_sat → AMC I/II/III)
+      2. Rational Method: Q_storm = C·i·A (peak stormflow component)
+      3. Antecedent baseflow: scaled from BASEFLOW_CFS × soil moisture multiplier
+      4. Rating curve: D = (Q_total / RATING_A)^(1/RATING_B)
+
+    All parameters are documented in watershed constants above.
+    Will be calibrated against actual sensor data upon NCCAT deployment.
+    """
+    import math
+
+    # 1. AMC adjustment of CN based on soil saturation
+    if soil_sat_pct < 30:
+        cn_adj = max(50, WS_CN_II * 0.87)   # AMC-I dry antecedent
+    elif soil_sat_pct < 65:
+        cn_adj = WS_CN_II                    # AMC-II normal
+    else:
+        # AMC-III — wet; standard formula: CN3 = 23*CN2 / (10 + 0.13*CN2)
+        cn_adj = min(95, (23 * WS_CN_II) / (10 + 0.13 * WS_CN_II))
+
+    # 2. SCS runoff depth from combined actual + forecast 24h rain
+    P  = max(0.0, rain_24h + qpf_24h)
+    S  = (1000 / cn_adj) - 10               # potential max retention (inches)
+    Ia = 0.2 * S                             # initial abstraction
+    Q_runoff_in = ((P - Ia)**2 / (P - Ia + S)) if P > Ia else 0.0
+
+    # 3. Rational Method peak storm discharge
+    # Runoff coefficient C derived from CN (Mockus 1949 approximation)
+    C = max(0.0, min(0.95, (cn_adj - 25) / 75))
+    i_inhr = P / 24.0                        # avg intensity (in/hr) over 24h window
+    Q_storm_cfs = (C * i_inhr * WS_AREA_ACRES) / 1.008  # rational method (cfs)
+
+    # 4. Antecedent baseflow: rises with soil saturation (higher water table)
+    bf_mult = 1.0 + (soil_sat_pct / 100) * 3.0   # 1× dry → 4× saturated
+    Q_base  = BASEFLOW_CFS * bf_mult
+
+    # 5. 7-day antecedent recession: adds sustained elevated flow
+    Q_recess = max(0.0, (rain_7d - rain_24h) * 0.8)   # inches → rough cfs offset
+
+    # 6. Total discharge
+    Q_total = Q_base + Q_storm_cfs + Q_recess
+    Q_total = round(max(BASEFLOW_CFS * 0.5, min(Q_total, 2800.0)), 1)
+
+    # 7. Rating curve: D = (Q / A)^(1/b)
+    depth_ft = (Q_total / RATING_A) ** (1.0 / RATING_B)
+    depth_ft = round(max(0.30, min(depth_ft, 7.8)), 2)
+
+    return depth_ft, Q_total
 
 
 def compute_flood_threat(soil_sat, qpf_24h, pop_24h):
@@ -399,8 +468,12 @@ t_label, t_color, t_bg = threat_meta(threat_score)
 
 if "depth" not in st.session_state: st.session_state.depth = 0.87
 if "flow"  not in st.session_state: st.session_state.flow  = 22.40
-st.session_state.depth = round(max(0.50, min(1.25, st.session_state.depth + np.random.uniform(-0.015, 0.015))), 2)
-st.session_state.flow  = round(max(10.0, min(40.0, st.session_state.flow  + np.random.uniform(-0.30,  0.30))),  2)
+
+# Replace random walk with physically modeled depth & discharge
+modeled_depth, modeled_flow = model_stream_conditions(soil_sat, rain_24h, qpf_24h, rain_7d)
+# Smooth toward modeled value (damp rapid jumps on each 30s refresh)
+st.session_state.depth = round(st.session_state.depth * 0.30 + modeled_depth * 0.70, 2)
+st.session_state.flow  = round(st.session_state.flow  * 0.30 + modeled_flow  * 0.70, 1)
 
 
 # ─────────────────────────────────────────────
@@ -460,27 +533,43 @@ with c5: st.plotly_chart(make_dial(soil_sat, "SOIL SATURATION", 0, 100, "%", "#0
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ROW 2: CULLOWHEE CREEK
-st.markdown('<div class="panel"><div class="panel-title">CULLOWHEE CREEK &mdash; LOCAL SENSOR FEED</div>', unsafe_allow_html=True)
+st.markdown('<div class="panel"><div class="panel-title">CULLOWHEE CREEK &mdash; WATERSHED MODEL (PRE-SENSOR)</div>', unsafe_allow_html=True)
 h1, h2, h3 = st.columns([2, 2, 3])
+
+# Depth status thresholds (ft) — NCCAT point, estimated bankfull ~5.5ft
+_d = st.session_state.depth
+_q = st.session_state.flow
+if _d < 2.5:   _depth_lbl, _depth_clr = "LOW FLOW",  "#00FF9C"
+elif _d < 4.0: _depth_lbl, _depth_clr = "NORMAL",    "#00FF9C"
+elif _d < 5.5: _depth_lbl, _depth_clr = "ELEVATED",  "#FFFF00"
+elif _d < 6.5: _depth_lbl, _depth_clr = "WATCH",     "#FFD700"
+else:          _depth_lbl, _depth_clr = "FLOOD",     "#FF3333"
+
+if _q < 40:    _flow_lbl,  _flow_clr  = "LOW FLOW",  "#00FF9C"
+elif _q < 150: _flow_lbl,  _flow_clr  = "NORMAL",    "#00FF9C"
+elif _q < 400: _flow_lbl,  _flow_clr  = "ELEVATED",  "#FFFF00"
+elif _q < 800: _flow_lbl,  _flow_clr  = "HIGH",      "#FFD700"
+else:          _flow_lbl,  _flow_clr  = "FLOOD",     "#FF3333"
+
 with h1:
     st.components.v1.html(make_animated_gauge_html(
         "g_depth", st.session_state.depth,
         "STREAM DEPTH", 0.0, 8.0, " ft",
         [{"range": [0.0, 4.0], "color": "rgba(0,255,156,0.15)"},
-         {"range": [4.0, 6.0], "color": "rgba(255,215,0,0.20)"},
-         {"range": [6.0, 8.0], "color": "rgba(255,51,51,0.25)"}],
-        "#00FF9C", "NORMAL", "#00FF9C",
-        f"Stage: {st.session_state.depth:.2f} ft  |  Flood: 6.00 ft", "NEMO SENSOR"
+         {"range": [4.0, 5.5], "color": "rgba(255,255,0,0.20)"},
+         {"range": [5.5, 8.0], "color": "rgba(255,51,51,0.25)"}],
+        _depth_clr, _depth_lbl, _depth_clr,
+        f"Stage: {st.session_state.depth:.2f} ft  |  Bankfull: ~5.5 ft", "SCS-CN MODEL"
     ), height=230)
 with h2:
     st.components.v1.html(make_animated_gauge_html(
         "g_flow", st.session_state.flow,
-        "DISCHARGE", 0.0, 200.0, " cfs",
-        [{"range": [0.0,   80.0], "color": "rgba(0,255,156,0.15)"},
-         {"range": [80.0, 140.0], "color": "rgba(255,215,0,0.20)"},
-         {"range": [140.0,200.0], "color": "rgba(255,51,51,0.25)"}],
-        "#5AC8FA", "LOW FLOW", "#5AC8FA",
-        f"Discharge: {st.session_state.flow:.2f} cfs", "NEMO SENSOR"
+        "DISCHARGE", 0.0, 1000.0, " cfs",
+        [{"range": [0.0,   150.0], "color": "rgba(0,255,156,0.15)"},
+         {"range": [150.0, 400.0], "color": "rgba(255,255,0,0.20)"},
+         {"range": [400.0,1000.0], "color": "rgba(255,51,51,0.25)"}],
+        _flow_clr, _flow_lbl, _flow_clr,
+        f"Q: {st.session_state.flow:.1f} cfs  |  Rating curve: Q=44·D^2.3", "RATIONAL METHOD"
     ), height=230)
 with h3:
     if sm_ok and sm_07 is not None:
@@ -512,8 +601,13 @@ with h3:
   <div style="font-size:0.78em; color:#7AACCC; line-height:2.0;">
     {sm_data_rows}
     Stored Water:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{soil_in:.2f}&quot; (0-35cm profile)<br>
-    <b>Flood Threat Weight: {soil_sat:.1f}% &times; 0.40</b><br>
-    <span style="color:#1A5070;">MODEL: ECMWF {sm_src_label} &middot; EVARD-COWEE-PLOTT SOILS</span>
+    <hr style="border-color:#1a3a5a; margin:6px 0;">
+    <span style="color:#FFFF00;">STREAM MODEL INPUTS</span><br>
+    Rain 24h:&nbsp;&nbsp;{rain_24h:.2f}&quot; &nbsp;|&nbsp; QPF 24h: {qpf_24h:.2f}&quot;<br>
+    Rain 7d:&nbsp;&nbsp;&nbsp;{rain_7d:.2f}&quot; &nbsp;|&nbsp; WS Area: {WS_AREA_ACRES:,} ac<br>
+    CN (adj):&nbsp;&nbsp;{WS_CN_II} base &nbsp;|&nbsp; Tc: {WS_TC_HRS}h &nbsp;|&nbsp; n={WS_MANN_N}<br>
+    <b>Modeled Q: {modeled_flow:.1f} cfs &nbsp;|&nbsp; D: {modeled_depth:.2f} ft</b><br>
+    <span style="color:#1A5070;">MODEL: ECMWF {sm_src_label} + SCS-CN/RATIONAL &middot; PENDING SENSOR CAL</span>
   </div>
 </div>""", unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
