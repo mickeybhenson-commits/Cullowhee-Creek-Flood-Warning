@@ -963,22 +963,55 @@ with u2:
         "RATIONAL METHOD"
     ), height=240)
 with u3:
-    st.markdown('<div style="transform:scale(0.64); transform-origin:top left; width:156%;">', unsafe_allow_html=True)
-    st.markdown("**UPPER SUB-WATERSHED PARAMETERS — ECOREGION 66 ANCHORED**")
-    ua, ub = st.columns(2)
-    ua.metric("Drainage Area",    f"{UP_AREA_ACRES:,} ac ({UP_DA_SQMI:.2f} mi²)", "~40% of total")
-    ub.metric("Bankfull Q (E66)", f"{UP_BANKFULL_Q:.0f} cfs",                     "Henson 2014 / SCDNR 2020")
-    uc, ud = st.columns(2)
-    uc.metric("Bankfull Stage",   f"{UP_BANKFULL:.2f} ft",                         "E66 Dbkf_mean × 1.35")
-    ud.metric("Width (E66)",      f"{UP_WIDTH_FT:.1f} ft",                          "Bankfull channel width")
-    ue, uf = st.columns(2)
-    ue.metric("Rating Curve A",   f"{UP_RATING_A:.1f}",                             f"B={UP_RATING_B} (Manning's)")
-    uf.metric("Flood Lead Time",  f"~{FLOOD_TRAVEL_MIN} min",                       "to NCCAT outlet")
-    st.caption(
-        f"E66 composite: Qbkf=35.0×DA^0.850 | Wbkf=12.5×DA^0.460 | Dbkf=1.05×DA^0.310\n"
-        f"Pre-calibration | K=Q_obs/Q_mod corrects after deployment | Reach scatter ±40-60%"
-    )
-    st.markdown('</div>', unsafe_allow_html=True)
+    _era5_str  = f"{sm_sources['era5_pct']:.0f}%" if sm_sources['era5_pct'] is not None else "UNAVAIL"
+    _api_str   = f"{sm_sources['api_pct']:.0f}%"
+    _usdm_str  = f"{sm_sources['usdm_pct']:.0f}%" if sm_sources['usdm_pct'] is not None else "N/A"
+    _usdm_clr  = "#FF8800" if usdm_level >= 3 else "#FFD700" if usdm_level == 2 else "#FFFF00" if usdm_level == 1 else "#00FF9C"
+    _usdm_tag  = usdm_label if usdm_level >= 0 else "NO DATA"
+    _era5_active = "✓" if sm_ok and sm_07 is not None else "✗"
+    _usdm_active = "✓" if usdm_level >= 0 else "✗"
+    st.markdown(f"""
+<div style="background:rgba(0,50,30,0.18); border:1px solid rgba(0,180,100,0.22);
+            border-radius:9px; padding:14px 16px; font-family:'Share Tech Mono',monospace;">
+  <div style="font-size:0.72em; color:#00CC77; letter-spacing:3px; margin-bottom:10px;
+              border-bottom:1px solid rgba(0,180,100,0.2); padding-bottom:6px;">
+    SOIL SATURATION &mdash; 3-SOURCE ENSEMBLE
+  </div>
+  <div style="font-size:2.5em; font-weight:700; color:{soil_color}; text-align:center;
+              margin:6px 0 4px;">{soil_sat:.1f}%</div>
+  <div style="font-size:0.7em; color:#5AACD0; text-align:center; margin-bottom:12px;">
+    stored: {soil_stored:.2f}&quot; &nbsp;|&nbsp; pore capacity
+  </div>
+  <div style="display:grid; grid-template-columns:auto 1fr auto; gap:3px 8px;
+              font-size:0.68em; align-items:center;">
+    <span style="color:#3A8050;">{_era5_active}</span>
+    <span style="color:#7AACCC;">ERA5-Land &nbsp;<span style="color:#2A6050;font-size:0.85em;">w={sm_sources['w_era5']:.0%}</span></span>
+    <span style="color:#AACCDD;">{_era5_str}</span>
+    <span style="color:#3A8050;">&#x2713;</span>
+    <span style="color:#7AACCC;">API/HRRR 5-day &nbsp;<span style="color:#2A6050;font-size:0.85em;">w={sm_sources['w_api']:.0%}</span></span>
+    <span style="color:#AACCDD;">{_api_str}</span>
+    <span style="color:#3A8050;">{_usdm_active}</span>
+    <span style="color:#7AACCC;">USDM &nbsp;<span style="color:#2A6050;font-size:0.85em;">w={sm_sources['w_usdm']:.0%}</span></span>
+    <span style="color:#AACCDD;">{_usdm_str}</span>
+  </div>
+  <div style="margin-top:10px; padding-top:7px; border-top:1px solid rgba(0,120,80,0.25);
+              font-size:0.65em; color:{_usdm_clr}; letter-spacing:1px;">
+    USDM: {_usdm_tag}
+  </div>
+  <div style="font-size:0.60em; color:#2A5040; margin-top:3px;">
+    Jackson Co. NC (FIPS 37099) &nbsp;|&nbsp; {usdm_date if usdm_date != "---" else "no date"}
+  </div>
+  <div style="font-size:0.60em; color:#2A5040; margin-top:1px;">
+    ERA5 valid: {sm_ts_str}
+  </div>
+  <div style="margin-top:10px; padding-top:7px; border-top:1px solid rgba(0,120,80,0.25);
+              font-size:0.62em; color:#1E6040; letter-spacing:1px; line-height:1.5;">
+    E66 BANKFULL: {UP_BANKFULL_Q:.0f} cfs &nbsp;|&nbsp; stage {UP_BANKFULL:.2f} ft
+    &nbsp;|&nbsp; W={UP_WIDTH_FT:.0f} ft &nbsp;|&nbsp; A={UP_RATING_A:.1f}&middot;D^{UP_RATING_B}
+    <br>DA={UP_DA_SQMI:.2f} mi² &nbsp;|&nbsp; Henson 2014 / SCDNR E66 2020
+  </div>
+</div>
+""", unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 
