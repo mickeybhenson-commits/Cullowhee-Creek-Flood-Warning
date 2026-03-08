@@ -1,20 +1,43 @@
+"""
+NOAH: Cullowhee Creek Flood Warning Dashboard
+Western Carolina University — NEMO River Energy Initiative
+Jackson County, NC — Watershed Monitoring System
+
+Architecture: Two-point sub-watershed model (pre-sensor)
+  UPPER: Headwaters sub-basin (~2,480 ac | CN=62 | Tc=1.2h)
+  LOWER: Full watershed outlet at NCCAT (~6,200 ac | CN=68 | Tc=2.5h)
+
+Flood wave travel time UPPER → LOWER: ~65 min (pre-calibration estimate)
+Post-deployment: K = Q_observed / Q_modeled calibrates both points independently.
+
+Data sources:
+  - Atmospheric:   Open-Meteo HRRR/GFS (real-time, no API key)
+  - Soil moisture: ECMWF ERA5-Land volumetric (0-7cm, 7-28cm) via Open-Meteo archive
+  - QPF / PoP:     NWS GSP Gridpoint API (Greenville-Spartanburg WFO)
+  - Radar:         NEXRAD WSR-88D KGSP — same feed used by NWS operations and Jackson Co. EM
+
+Version: 2026-03  |  Status: Pre-sensor (modeled)  |  Next: NCCAT Blues Notecard deployment
+"""
+
 import streamlit as st
 import requests
 import json
+import time
 import numpy as np
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from collections import defaultdict
 from streamlit_autorefresh import st_autorefresh
 
-# ─────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  1. CONFIGURATION & STYLING
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
 st.set_page_config(page_title="NOAH: Cullowhee Flood Warning", layout="wide")
 st_autorefresh(interval=30000, key="refresh")
 
-LAT, LON  = 35.3079, -83.1746
-USGS_SITE = "02178400"
+LAT, LON = 35.3079, -83.1746   # Cullowhee Creek / NCCAT vicinity
 
 st.markdown("""
 <style>
@@ -29,61 +52,105 @@ html, body, .stApp { background-color: #04090F; color: #E0E8F0; font-family: 'Ra
 .panel-title { font-family: 'Share Tech Mono', monospace; font-size: 0.78em; color: #0077FF;
                text-transform: uppercase; letter-spacing: 3px;
                border-bottom: 1px solid rgba(0,119,255,0.18); padding-bottom: 8px; margin-bottom: 14px; }
+.upper-panel { background: rgba(8,16,28,0.88); border: 1px solid rgba(0,180,100,0.25);
+               border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; }
+.upper-title { font-family: 'Share Tech Mono', monospace; font-size: 0.78em; color: #00CC77;
+               text-transform: uppercase; letter-spacing: 3px;
+               border-bottom: 1px solid rgba(0,180,100,0.25); padding-bottom: 8px; margin-bottom: 14px; }
+.lower-panel { background: rgba(8,16,28,0.88); border: 1px solid rgba(0,119,255,0.25);
+               border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; }
+.lower-title { font-family: 'Share Tech Mono', monospace; font-size: 0.78em; color: #0099FF;
+               text-transform: uppercase; letter-spacing: 3px;
+               border-bottom: 1px solid rgba(0,119,255,0.25); padding-bottom: 8px; margin-bottom: 14px; }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ─────────────────────────────────────────────
-#  2. DATA ACQUISITION
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#  2. WATERSHED & SOIL CONSTANTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Soil physics — WNC Ultisols (Evard-Cowee-Plott series, SSURGO) ────────────
+SOIL_POROSITY  = 0.439   # m³/m³ — saturation point (all pores filled)
+SOIL_FIELD_CAP = 0.286   # m³/m³ — field capacity (gravity drainage complete)
+SOIL_WILT_PT   = 0.151   # m³/m³ — permanent wilting point (plant-unavailable)
+
+# ── LOWER sub-watershed: Full outlet at NCCAT ─────────────────────────────────
+# Drains entire Cullowhee Creek watershed. Sensor target: NCCAT bridge/staff gauge.
+# Source: HUC-12 delineation, NLCD 2021, SSURGO, Kirpich Tc formula.
+LO_AREA_ACRES = 6200     # Total watershed drainage area to NCCAT (ac)
+LO_TC_HRS     = 2.5      # Time of concentration (hr) — Kirpich estimate
+LO_CN_II      = 68       # SCS CN AMC-II: forested Ultisol, ~20% impervious
+LO_RATING_A   = 44.0     # Rating curve Q = A * D^B — coefficient
+LO_RATING_B   = 2.30     # Rating curve exponent (Manning's-derived, cobble channel)
+LO_BASEFLOW   = 9.0      # Low-season baseflow estimate at NCCAT (cfs)
+LO_BANKFULL   = 5.5      # Estimated bankfull stage at NCCAT (ft)
+LO_WIDTH_FT   = 28.0     # Bankfull channel width at NCCAT (ft)
+LO_MANN_N     = 0.045    # Manning's n — natural cobble/gravel mountain stream
+
+# ── UPPER sub-watershed: Headwaters above WCU campus ─────────────────────────
+# Steeper, denser forest, higher elevation (~3,200 ft). Faster response time.
+# Sensor target: upper Cullowhee Creek bridge near headwaters.
+# Flood wave travel time UPPER → LOWER: ~65 min (will be calibrated from
+#   cross-correlation of sensor peaks on first observed flood event).
+UP_AREA_ACRES    = 2480  # Upper sub-basin drainage area (~40% of total) (ac)
+UP_TC_HRS        = 1.2   # Shorter Tc — steeper gradient, smaller basin (hr)
+UP_CN_II         = 62    # Lower CN — denser canopy, less development
+UP_RATING_A      = 18.0  # Upper rating curve coefficient
+UP_RATING_B      = 2.15  # Upper rating curve exponent
+UP_BASEFLOW      = 3.5   # Low-season baseflow estimate at headwaters (cfs)
+UP_BANKFULL      = 3.8   # Estimated bankfull stage at headwaters (ft)
+FLOOD_TRAVEL_MIN = 65    # Flood wave travel time UPPER → NCCAT (min, pre-cal)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  3. DATA ACQUISITION
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=300)
 def fetch_openmeteo_current():
-    """Real-time conditions from Open-Meteo for exact Cullowhee lat/lon — no API key required."""
+    """Real-time atmospheric conditions — Open-Meteo HRRR/GFS, exact Cullowhee coords."""
     try:
         r = requests.get(
             "https://api.open-meteo.com/v1/forecast",
             params={
-                "latitude":             LAT,
-                "longitude":            LON,
-                "current":              "temperature_2m,relative_humidity_2m,wind_speed_10m,"
-                                        "wind_direction_10m,surface_pressure,precipitation,"
-                                        "weather_code,wind_gusts_10m",
-                "temperature_unit":     "fahrenheit",
-                "wind_speed_unit":      "mph",
-                "precipitation_unit":   "inch",
-                "forecast_days":        1,
+                "latitude":           LAT,
+                "longitude":          LON,
+                "current":            "temperature_2m,relative_humidity_2m,wind_speed_10m,"
+                                      "wind_direction_10m,surface_pressure,precipitation,"
+                                      "weather_code,wind_gusts_10m",
+                "temperature_unit":   "fahrenheit",
+                "wind_speed_unit":    "mph",
+                "precipitation_unit": "inch",
+                "forecast_days":      1,
             },
             timeout=10
         ).json()
         c = r["current"]
-        # Convert surface pressure hPa -> inHg
-        press_inhg = round(c.get("surface_pressure", 1013.25) * 0.02953, 2)
         return {
-            "ok":       True,
-            "temp":     round(float(c.get("temperature_2m",        50)),  2),
-            "hum":      round(float(c.get("relative_humidity_2m",  50)),  2),
-            "wind":     round(float(c.get("wind_speed_10m",         0)),  2),
-            "wind_gust":round(float(c.get("wind_gusts_10m",         0)),  2),
-            "wind_dir": round(float(c.get("wind_direction_10m",     0)),  2),
-            "press":    press_inhg,
-            "precip":   round(float(c.get("precipitation",          0)),  2),
-            "wcode":    c.get("weather_code", 0),
+            "ok":        True,
+            "temp":      round(float(c.get("temperature_2m",       50)), 2),
+            "hum":       round(float(c.get("relative_humidity_2m", 50)), 2),
+            "wind":      round(float(c.get("wind_speed_10m",        0)), 2),
+            "wind_gust": round(float(c.get("wind_gusts_10m",        0)), 2),
+            "wind_dir":  round(float(c.get("wind_direction_10m",    0)), 2),
+            "press":     round(c.get("surface_pressure", 1013.25) * 0.02953, 2),
+            "precip":    round(float(c.get("precipitation",         0)), 2),
+            "wcode":     c.get("weather_code", 0),
         }
-    except Exception as e:
-        return {"ok": False, "temp": 50.00, "hum": 50.00, "wind": 0.00,
-                "wind_gust": 0.00, "wind_dir": 0.00, "press": 29.92,
-                "precip": 0.00, "wcode": 0}
-
-
+    except Exception:
+        return {"ok": False, "temp": 50.0, "hum": 50.0, "wind": 0.0,
+                "wind_gust": 0.0, "wind_dir": 0.0, "press": 29.92,
+                "precip": 0.0, "wcode": 0}
 
 
 @st.cache_data(ttl=1800)
 def fetch_nws_forecast():
+    """7-day QPF, PoP, high temp — NWS GSP Gridpoint API."""
     try:
-        hdrs    = {"User-Agent": "NOAH-FloodWarning/1.0 (WCU NEMO Project)"}
-        pts     = requests.get(f"https://api.weather.gov/points/{LAT},{LON}",
-                               headers=hdrs, timeout=10).json()["properties"]
+        hdrs = {"User-Agent": "NOAH-FloodWarning/1.0 (WCU NEMO Project)"}
+        pts  = requests.get(f"https://api.weather.gov/points/{LAT},{LON}",
+                            headers=hdrs, timeout=10).json()["properties"]
         wfo, gx, gy = pts["gridId"], pts["gridX"], pts["gridY"]
         periods = requests.get(pts["forecast"],
                                headers=hdrs, timeout=10).json()["properties"]["periods"]
@@ -97,7 +164,7 @@ def fetch_nws_forecast():
             try:
                 d = datetime.fromisoformat(vt).strftime("%Y-%m-%d")
                 qpf_by_date[d] += val * 0.0393701
-            except:
+            except Exception:
                 pass
 
         temp_by_date = {}
@@ -110,7 +177,7 @@ def fetch_nws_forecast():
                     tf = round(val * 9 / 5 + 32, 2)
                     if d not in temp_by_date or tf > temp_by_date[d]:
                         temp_by_date[d] = tf
-                except:
+                except Exception:
                     pass
 
         result, seen = [], set()
@@ -131,7 +198,7 @@ def fetch_nws_forecast():
                     "pop":        round(float((p.get("probabilityOfPrecipitation") or {}).get("value") or 0), 2),
                     "icon_txt":   str(p.get("shortForecast", "")),
                 })
-            except:
+            except Exception:
                 continue
         return result, True, None
     except Exception as e:
@@ -139,10 +206,10 @@ def fetch_nws_forecast():
 
 
 @st.cache_data(ttl=1800)
-def fetch_30d_precip():
+def fetch_precip_history():
     """
-    Uses Open-Meteo HRRR/GFS hourly precip — no ERA5 latency.
-    past_days=14 + forecast_days=1 gives current-hour accuracy.
+    HRRR/GFS hourly precip — no ERA5 latency.
+    Returns 14d total, 7d total, 7d snow, 24h accumulation.
     """
     try:
         r = requests.get(
@@ -152,7 +219,6 @@ def fetch_30d_precip():
                 "longitude":          LON,
                 "hourly":             "precipitation,snowfall",
                 "precipitation_unit": "inch",
-                "wind_speed_unit":    "mph",
                 "past_days":          14,
                 "forecast_days":      1,
                 "models":             "best_match",
@@ -160,50 +226,40 @@ def fetch_30d_precip():
             timeout=10
         ).json()
 
-        now        = datetime.utcnow()
-        times      = r["hourly"]["time"]
-        precip_h   = r["hourly"]["precipitation"]
-        snow_h     = r["hourly"].get("snowfall", [0]*len(times))
+        now      = datetime.utcnow()
+        times    = r["hourly"]["time"]
+        precip_h = r["hourly"]["precipitation"]
+        snow_h   = r["hourly"].get("snowfall", [0] * len(times))
 
-        total_14d = 0.0
-        total_7d  = 0.0
-        total_24h = 0.0
-        snow_7d   = 0.0
-
+        t14d = t7d = t24h = snow7d = 0.0
         for i, t in enumerate(times):
             try:
                 dt = datetime.fromisoformat(t)
-            except:
+            except Exception:
                 continue
-            age_days = (now - dt).total_seconds() / 86400
-            if age_days < 0:        # skip future hours
+            age = (now - dt).total_seconds() / 86400
+            if age < 0:
                 continue
             p = precip_h[i] or 0.0
-            s = (snow_h[i] or 0.0) * 0.0393701  # cm -> inch
-            if age_days <= 14:
-                total_14d += p
-            if age_days <= 7:
-                total_7d  += p
-                snow_7d   += s
-            if age_days <= 1:
-                total_24h += p
+            s = (snow_h[i] or 0.0) * 0.0393701   # cm → inch
+            if age <= 14: t14d  += p
+            if age <= 7:  t7d   += p; snow7d += s
+            if age <= 1:  t24h  += p
 
-        return round(total_14d,2), round(total_7d,2), round(snow_7d,2), round(total_24h,2), True
-    except Exception as e:
+        return round(t14d, 2), round(t7d, 2), round(snow7d, 2), round(t24h, 2), True
+    except Exception:
         return 2.10, 0.50, 0.00, 0.00, False
 
 
 @st.cache_data(ttl=3600)
 def fetch_era5_soil_moisture():
     """
-    ERA5-Land volumetric soil moisture — best available model for pre-sensor operations.
-    Two depth layers relevant to surface runoff / infiltration:
-      0-7cm  : surface response layer  (fastest response to rainfall)
-      7-28cm : root zone / vadose zone  (controls longer-term saturation state)
-    ERA5-Land lag: ~5 days. We fetch last 14 days and take most recent valid data.
+    ECMWF ERA5-Land volumetric soil moisture (m³/m³).
+    Two depth layers — surface (0-7cm) and root zone (7-28cm).
+    ERA5-Land lag: ~5 days. Fetches last 14 days, returns most recent valid pair.
+    Falls back gracefully if archive API is unavailable.
     """
     try:
-        from datetime import date, timedelta
         end_dt   = date.today()
         start_dt = date.today() - timedelta(days=14)
         r = requests.get(
@@ -223,135 +279,94 @@ def fetch_era5_soil_moisture():
         sm_07  = r["hourly"]["soil_moisture_0_to_7cm"]
         sm_728 = r["hourly"]["soil_moisture_7_to_28cm"]
 
-        # Walk backwards to find most recent non-null pair
-        latest_07, latest_728, latest_ts = None, None, None
         for i in range(len(times) - 1, -1, -1):
             if sm_07[i] is not None and sm_728[i] is not None:
-                latest_07  = sm_07[i]
-                latest_728 = sm_728[i]
-                latest_ts  = times[i]
-                break
+                return round(sm_07[i], 4), round(sm_728[i], 4), times[i], True
 
-        if latest_07 is None:
-            return None, None, None, False
-
-        return round(latest_07, 4), round(latest_728, 4), latest_ts, True
-
+        return None, None, None, False
     except Exception:
         return None, None, None, False
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#  4. HYDRO-MODELING
+# ═══════════════════════════════════════════════════════════════════════════════
 
-
-# ─────────────────────────────────────────────
-#  3. HYDRO-MODELING
-# ─────────────────────────────────────────────
-
-# ERA5-Land / Ultisol soil constants for WNC (Evard-Cowee-Plott series)
-# These match the loam soil type ERA5-Land assigns to this terrain class.
-SOIL_POROSITY  = 0.439   # m3/m3 — saturated (pore space)
-SOIL_FIELD_CAP = 0.286   # m3/m3 — field capacity (drains freely above this)
-SOIL_WILT_PT   = 0.151   # m3/m3 — permanent wilting point
-
-# ── Cullowhee Creek Watershed Parameters (NCCAT sensor point) ──────────────
-# Source: HUC-12 delineation, NLCD land cover, SSURGO soils, field estimates
-# All values flagged for calibration update upon sensor deployment.
-WS_AREA_ACRES = 6200        # ~25.1 km² drainage area to NCCAT gauge point
-WS_TC_HRS     = 2.5         # Time of concentration, Kirpich formula estimate (hr)
-WS_CN_II      = 68          # SCS Curve Number, AMC-II (forested Ultisol, ~20% impervious)
-WS_SLOPE      = 0.010       # Average channel slope ft/ft
-WS_WIDTH_FT   = 28.0        # Estimated bankfull channel width at NCCAT (ft)
-WS_MANN_N     = 0.045       # Manning's n, natural cobble/gravel mountain stream
-# Power-law rating curve Q = RATING_A * D^RATING_B (depth→discharge)
-# Derived from Manning's + trapezoidal cross-section; update with sensor data
-RATING_A      = 44.0        # discharge coefficient (cfs/ft^b)
-RATING_B      = 2.30        # depth exponent (typical 2.1–2.6 for WNC streams)
-BASEFLOW_CFS  = 9.0         # Estimated low-season baseflow at NCCAT (cfs)
-
-def get_soil_model(sm_07, sm_728):
+def calc_soil_saturation(sm_07, sm_728):
     """
-    Convert ERA5-Land volumetric soil moisture (m3/m3) to saturation % and
-    equivalent stored water inches for dashboard display.
-
-    Weighted average: surface 0-7cm gets 55% weight (most flood-relevant),
-    root zone 7-28cm gets 45% weight.
-
-    Stored water inches:
-      0-7cm  layer = 2.756 inches deep  -> stored = sm_07  * 2.756
-      7-28cm layer = 8.268 inches deep  -> stored = sm_728 * 8.268
+    Convert ERA5-Land volumetric soil moisture to saturation % and stored water.
+    Weights: surface 55% (most flood-relevant), root zone 45%.
+    Layer depths: 0-7cm = 2.756", 7-28cm = 8.268"
+    ERA5-Land can exceed theoretical porosity — values are clamped.
     """
-    RANGE = SOIL_POROSITY - SOIL_WILT_PT  # 0.288 m3/m3 = full available range
+    sm_07  = min(sm_07,  SOIL_POROSITY)
+    sm_728 = min(sm_728, SOIL_POROSITY)
+    sm_avg = (sm_07 * 0.55) + (sm_728 * 0.45)
+    sm_avg = min(sm_avg, SOIL_POROSITY)
 
-    sm_avg  = (sm_07 * 0.55) + (sm_728 * 0.45)
-    # Clamp to valid range — ERA5-Land can report values above theoretical porosity
-    sm_avg  = min(sm_avg, SOIL_POROSITY)
-    sat_pct = min(100.0, max(0.0, (sm_avg - SOIL_WILT_PT) / RANGE * 100))
-
-    stored_in = (sm_07 * 2.756) + (sm_728 * 8.268)
-
-    color = "#FF3333" if sat_pct > 85 else "#FF8800" if sat_pct > 70 else "#FFD700" if sat_pct > 50 else "#00FF9C"
-    return round(stored_in, 2), round(sat_pct, 2), color
+    sat_range = SOIL_POROSITY - SOIL_WILT_PT
+    sat_pct   = round(min(100.0, max(0.0, (sm_avg - SOIL_WILT_PT) / sat_range * 100)), 2)
+    stored_in = round((sm_07 * 2.756) + (sm_728 * 8.268), 2)
+    color     = "#FF3333" if sat_pct > 85 else "#FF8800" if sat_pct > 70 else "#FFD700" if sat_pct > 50 else "#00FF9C"
+    return sat_pct, stored_in, color
 
 
-def model_stream_conditions(soil_sat_pct, rain_24h, qpf_24h, rain_7d):
+def model_stream(soil_sat_pct, rain_24h, qpf_24h, rain_7d,
+                 area_acres, cn_ii, baseflow, rating_a, rating_b):
     """
-    Cullowhee Creek depth and discharge model — pre-sensor operational estimate.
+    SCS-CN + Rational Method + Manning's rating curve.
 
-    Method:
-      1. SCS-CN with AMC adjustment (soil_sat → AMC I/II/III)
-      2. Rational Method: Q_storm = C·i·A (peak stormflow component)
-      3. Antecedent baseflow: scaled from BASEFLOW_CFS × soil moisture multiplier
-      4. Rating curve: D = (Q_total / RATING_A)^(1/RATING_B)
+    Steps:
+      1. AMC adjustment: soil saturation % → CN (I=dry, II=normal, III=saturated)
+      2. SCS runoff depth from combined observed + forecast 24h rainfall
+      3. Rational Method: Q_storm = C·i·A / 1.008
+      4. Baseflow: rises 1× dry → 4× saturated (elevated water table)
+      5. 7-day recession contribution from antecedent wet soils
+      6. Rating curve: D = (Q / rating_a)^(1/rating_b)
 
-    All parameters are documented in watershed constants above.
-    Will be calibrated against actual sensor data upon NCCAT deployment.
+    All parameters are desk estimates pending sensor calibration.
+    Post-deployment: K = Q_obs/Q_mod corrects each point independently.
     """
-    import math
-
-    # 1. AMC adjustment of CN based on soil saturation
+    # 1. AMC-adjusted CN
     if soil_sat_pct < 30:
-        cn_adj = max(50, WS_CN_II * 0.87)   # AMC-I dry antecedent
+        cn_adj = max(50, cn_ii * 0.87)
     elif soil_sat_pct < 65:
-        cn_adj = WS_CN_II                    # AMC-II normal
+        cn_adj = cn_ii
     else:
-        # AMC-III — wet; standard formula: CN3 = 23*CN2 / (10 + 0.13*CN2)
-        cn_adj = min(95, (23 * WS_CN_II) / (10 + 0.13 * WS_CN_II))
+        cn_adj = min(95, (23 * cn_ii) / (10 + 0.13 * cn_ii))
 
-    # 2. SCS runoff depth from combined actual + forecast 24h rain
+    # 2. SCS runoff depth
     P  = max(0.0, rain_24h + qpf_24h)
-    S  = (1000 / cn_adj) - 10               # potential max retention (inches)
-    Ia = 0.2 * S                             # initial abstraction
-    Q_runoff_in = ((P - Ia)**2 / (P - Ia + S)) if P > Ia else 0.0
+    S  = (1000 / cn_adj) - 10
+    Ia = 0.2 * S
+    # Q_runoff_in kept for future use in volume calculations
+    Q_runoff_in = ((P - Ia)**2 / (P - Ia + S)) if P > Ia else 0.0   # noqa
 
-    # 3. Rational Method peak storm discharge
-    # Runoff coefficient C derived from CN (Mockus 1949 approximation)
-    C = max(0.0, min(0.95, (cn_adj - 25) / 75))
-    i_inhr = P / 24.0                        # avg intensity (in/hr) over 24h window
-    Q_storm_cfs = (C * i_inhr * WS_AREA_ACRES) / 1.008  # rational method (cfs)
+    # 3. Rational Method storm discharge
+    C           = max(0.0, min(0.95, (cn_adj - 25) / 75))
+    i_inhr      = P / 24.0
+    Q_storm_cfs = (C * i_inhr * area_acres) / 1.008
 
-    # 4. Antecedent baseflow: rises with soil saturation (higher water table)
-    bf_mult = 1.0 + (soil_sat_pct / 100) * 3.0   # 1× dry → 4× saturated
-    Q_base  = BASEFLOW_CFS * bf_mult
+    # 4. Antecedent baseflow (moisture-scaled)
+    Q_base = baseflow * (1.0 + (soil_sat_pct / 100) * 3.0)
 
-    # 5. 7-day antecedent recession: adds sustained elevated flow
-    Q_recess = max(0.0, (rain_7d - rain_24h) * 0.8)   # inches → rough cfs offset
+    # 5. 7-day recession
+    Q_recess = max(0.0, (rain_7d - rain_24h) * 0.8)
 
-    # 6. Total discharge
-    Q_total = Q_base + Q_storm_cfs + Q_recess
-    Q_total = round(max(BASEFLOW_CFS * 0.5, min(Q_total, 2800.0)), 1)
-
-    # 7. Rating curve: D = (Q / A)^(1/b)
-    depth_ft = (Q_total / RATING_A) ** (1.0 / RATING_B)
-    depth_ft = round(max(0.30, min(depth_ft, 7.8)), 2)
+    # 6. Total Q and rating curve depth
+    Q_total  = round(max(baseflow * 0.5, min(Q_base + Q_storm_cfs + Q_recess, 2800.0)), 1)
+    depth_ft = round(max(0.30, min((Q_total / rating_a) ** (1.0 / rating_b), 7.8)), 2)
 
     return depth_ft, Q_total
 
 
-def compute_flood_threat(soil_sat, qpf_24h, pop_24h):
-    soil_score = soil_sat * 0.40
-    qpf_score  = min(100.0, qpf_24h * 40) * 0.35
-    pop_score  = pop_24h * 0.25
-    return round(min(100.0, soil_score + qpf_score + pop_score), 2)
+def flood_threat_score(soil_sat, qpf_24h, pop_24h):
+    """Composite threat: soil saturation 40%, QPF 35%, PoP 25%."""
+    return round(min(100.0,
+        (soil_sat * 0.40) +
+        (min(100.0, qpf_24h * 40) * 0.35) +
+        (pop_24h * 0.25)
+    ), 2)
 
 
 def threat_meta(score):
@@ -360,6 +375,23 @@ def threat_meta(score):
     if score < 65: return "WATCH",     "#FFD700", "rgba(255,215,0,0.09)"
     if score < 82: return "WARNING",   "#FF8800", "rgba(255,136,0,0.11)"
     return               "EMERGENCY",  "#FF3333", "rgba(255,51,51,0.14)"
+
+
+def stage_status(depth_ft, bankfull_ft, lo_thresh=0.45, hi_thresh=0.70):
+    """Convert depth to status label and color relative to bankfull."""
+    ratio = depth_ft / bankfull_ft
+    if ratio < 0.45:  return "LOW FLOW",  "#00FF9C"
+    if ratio < 0.65:  return "NORMAL",    "#00FF9C"
+    if ratio < 0.75:  return "ELEVATED",  "#FFFF00"
+    if ratio < 0.90:  return "WATCH",     "#FFD700"
+    return                   "FLOOD",     "#FF3333"
+
+
+def flow_status(q, lo, elev, high):
+    if q < lo:   return "LOW FLOW",  "#00FF9C"
+    if q < elev: return "NORMAL",    "#00FF9C"
+    if q < high: return "ELEVATED",  "#FFFF00"
+    return              "FLOOD",     "#FF3333"
 
 
 def nws_icon(txt):
@@ -377,53 +409,45 @@ def nws_icon(txt):
     return "---"
 
 
-# ─────────────────────────────────────────────
-#  4. UI BUILDERS
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#  5. UI COMPONENT BUILDERS
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def make_dial(v, t, min_v, max_v, u, c, sub="", src=""):
-    # Build title text with clean, readable hierarchy
-    title_parts = [f"<b>{t}</b>"]
-    if sub:
-        title_parts.append(f"<span style='font-size:11px;color:#7AACCC'>{sub}</span>")
-    if src:
-        title_parts.append(f"<span style='font-size:9px;color:#2A6080'>{src}</span>")
-    title_text = "<br>".join(title_parts)
-
+    """Plotly gauge dial with clean 3-level typography hierarchy."""
+    parts = [f"<b>{t}</b>"]
+    if sub: parts.append(f"<span style='font-size:11px;color:#7AACCC'>{sub}</span>")
+    if src: parts.append(f"<span style='font-size:9px;color:#2A6080'>{src}</span>")
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
         value=v,
         number={"suffix": u, "font": {"size": 24, "color": "white"}, "valueformat": ".2f"},
-        title={
-            "text": title_text,
-            "font": {"size": 13, "color": "#A0C8E0"},
-        },
+        title={"text": "<br>".join(parts), "font": {"size": 13, "color": "#A0C8E0"}},
         gauge={
-            "axis":    {"range": [min_v, max_v], "tickfont": {"size": 9, "color": "#334455"}},
-            "bar":     {"color": c, "thickness": 0.25},
+            "axis": {"range": [min_v, max_v], "tickfont": {"size": 9, "color": "#334455"}},
+            "bar":  {"color": c, "thickness": 0.25},
             "bgcolor": "rgba(0,0,0,0)",
         },
     ))
-    fig.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        margin=dict(t=70, b=20, l=25, r=25),
-        height=185,
-    )
+    fig.update_layout(paper_bgcolor="rgba(0,0,0,0)",
+                      margin=dict(t=70, b=20, l=25, r=25), height=185)
     return fig
 
 
-def make_animated_gauge_html(gid, v, t, min_v, max_v, u, thresh, nclr, slbl, sclr, sub, src):
+def make_stream_gauge(gid, v, title, min_v, max_v, unit, ranges, needle_clr,
+                      status_lbl, status_clr, sub_line, src_line):
+    """Animated canvas arc gauge for stream depth / discharge."""
     t_js = json.dumps(
-        [{"r0": x["range"][0], "r1": x["range"][1], "color": x["color"]} for x in thresh]
+        [{"r0": x["range"][0], "r1": x["range"][1], "color": x["color"]} for x in ranges]
     )
     return f"""<html><body style="background:transparent;text-align:center;
 font-family:'Rajdhani',sans-serif;color:white;">
 <canvas id="{gid}" width="260" height="150"></canvas>
-<div style="color:{sclr};font-weight:700;font-size:16px;
-            text-transform:uppercase;letter-spacing:2px;">{slbl}</div>
-<div style="font-size:12px;color:#7AACCC;margin-top:4px;">{sub}</div>
+<div style="color:{status_clr};font-weight:700;font-size:16px;
+            text-transform:uppercase;letter-spacing:2px;">{status_lbl}</div>
+<div style="font-size:12px;color:#7AACCC;margin-top:4px;">{sub_line}</div>
 <div style="font-size:9px;color:#1A5070;font-family:'Share Tech Mono',monospace;
-            margin-top:2px;">SRC: {src}</div>
+            margin-top:2px;">SRC: {src_line}</div>
 <script>
 (function(){{
     const canvas=document.getElementById('{gid}');
@@ -437,13 +461,13 @@ font-family:'Rajdhani',sans-serif;color:white;">
             ctx.arc(cx,cy,r,toA(t.r0),toA(t.r1)); ctx.stroke();
         }});
         const ang=toA(Math.max({min_v},Math.min({max_v},val)));
-        ctx.beginPath(); ctx.strokeStyle='{nclr}'; ctx.lineWidth=4;
+        ctx.beginPath(); ctx.strokeStyle='{needle_clr}'; ctx.lineWidth=4;
         ctx.moveTo(cx,cy); ctx.lineTo(cx+r*Math.cos(ang),cy+r*Math.sin(ang)); ctx.stroke();
         ctx.beginPath(); ctx.arc(cx,cy,6,0,2*Math.PI);
-        ctx.fillStyle='{nclr}'; ctx.fill();
+        ctx.fillStyle='{needle_clr}'; ctx.fill();
         ctx.fillStyle='white'; ctx.font='bold 20px Rajdhani';
         ctx.textAlign='center';
-        ctx.fillText(val.toFixed(2)+"{u}",cx,cy-40);
+        ctx.fillText(val.toFixed(2)+"{unit}",cx,cy-40);
     }}
     let cur={min_v};
     function anim(){{
@@ -455,43 +479,74 @@ font-family:'Rajdhani',sans-serif;color:white;">
 </script></body></html>"""
 
 
-# ─────────────────────────────────────────────
-#  5. DATA EXECUTION
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#  6. DATA EXECUTION
+# ═══════════════════════════════════════════════════════════════════════════════
 
-noaa                    = fetch_openmeteo_current()
-forecast, fc_ok, fc_err = fetch_nws_forecast()
-rain_30d, rain_7d, snow_7d, rain_24h, prcp_ok = fetch_30d_precip()
-sm_07, sm_728, sm_ts, sm_ok = fetch_era5_soil_moisture()
+noaa                                    = fetch_openmeteo_current()
+forecast, fc_ok, fc_err                 = fetch_nws_forecast()
+rain_14d, rain_7d, snow_7d, rain_24h, _ = fetch_precip_history()
+sm_07, sm_728, sm_ts, sm_ok             = fetch_era5_soil_moisture()
 
-# ERA5-Land data preferred; proxy fallback if unavailable
+# Soil saturation — ERA5-Land preferred, precip proxy fallback
 if sm_ok and sm_07 is not None:
-    soil_in, soil_sat, soil_color = get_soil_model(sm_07, sm_728)
+    soil_sat, soil_stored, soil_color = calc_soil_saturation(sm_07, sm_728)
+    sm_07_c   = min(sm_07,  SOIL_POROSITY)
+    sm_728_c  = min(sm_728, SOIL_POROSITY)
+    sm_range  = SOIL_POROSITY - SOIL_WILT_PT
+    sm_07_pct  = round(max(0, min(100, (sm_07_c  - SOIL_WILT_PT) / sm_range * 100)), 1)
+    sm_728_pct = round(max(0, min(100, (sm_728_c - SOIL_WILT_PT) / sm_range * 100)), 1)
+    sm_ts_str  = sm_ts[:13].replace("T", " ") + " UTC" if sm_ts else "---"
 else:
-    _range    = SOIL_POROSITY - SOIL_WILT_PT
-    _sm_proxy = min(SOIL_POROSITY, SOIL_WILT_PT + (min(rain_30d, 14.0) / 14.0) * _range)
-    soil_in, soil_sat, soil_color = get_soil_model(_sm_proxy, _sm_proxy * 0.85)
+    _proxy = min(SOIL_POROSITY, SOIL_WILT_PT + (min(rain_14d, 14.0) / 14.0) * (SOIL_POROSITY - SOIL_WILT_PT))
+    soil_sat, soil_stored, soil_color = calc_soil_saturation(_proxy, _proxy * 0.85)
+    sm_07_c = sm_728_c = 0.0
+    sm_07_pct = sm_728_pct = 0.0
+    sm_ts_str = "PROXY MODE"
 
-qpf_24h    = forecast[0]["qpf"] if forecast else 0.0
-pop_24h    = forecast[0]["pop"] if forecast else 0.0
-threat_score            = compute_flood_threat(soil_sat, qpf_24h, pop_24h)
-t_label, t_color, t_bg = threat_meta(threat_score)
+# NWS forecast values
+qpf_24h = forecast[0]["qpf"] if forecast else 0.0
+pop_24h = forecast[0]["pop"] if forecast else 0.0
 
-if "depth" not in st.session_state: st.session_state.depth = 0.87
-if "flow"  not in st.session_state: st.session_state.flow  = 22.40
+# Composite flood threat
+threat      = flood_threat_score(soil_sat, qpf_24h, pop_24h)
+t_lbl, t_clr, t_bg = threat_meta(threat)
 
-# Replace random walk with physically modeled depth & discharge
-modeled_depth, modeled_flow = model_stream_conditions(soil_sat, rain_24h, qpf_24h, rain_7d)
-# Smooth toward modeled value (damp rapid jumps on each 30s refresh)
-st.session_state.depth = round(st.session_state.depth * 0.30 + modeled_depth * 0.70, 2)
-st.session_state.flow  = round(st.session_state.flow  * 0.30 + modeled_flow  * 0.70, 1)
+# ── LOWER watershed model (full outlet, NCCAT) ────────────────────────────────
+lo_depth, lo_flow = model_stream(
+    soil_sat, rain_24h, qpf_24h, rain_7d,
+    LO_AREA_ACRES, LO_CN_II, LO_BASEFLOW, LO_RATING_A, LO_RATING_B
+)
+
+# ── UPPER watershed model (headwaters sub-basin) ─────────────────────────────
+up_depth, up_flow = model_stream(
+    soil_sat, rain_24h, qpf_24h, rain_7d,
+    UP_AREA_ACRES, UP_CN_II, UP_BASEFLOW, UP_RATING_A, UP_RATING_B
+)
+
+# Smoothed display values (damp 30s refresh jumps)
+if "lo_depth" not in st.session_state: st.session_state.lo_depth = lo_depth
+if "lo_flow"  not in st.session_state: st.session_state.lo_flow  = lo_flow
+if "up_depth" not in st.session_state: st.session_state.up_depth = up_depth
+if "up_flow"  not in st.session_state: st.session_state.up_flow  = up_flow
+
+st.session_state.lo_depth = round(st.session_state.lo_depth * 0.30 + lo_depth * 0.70, 2)
+st.session_state.lo_flow  = round(st.session_state.lo_flow  * 0.30 + lo_flow  * 0.70, 1)
+st.session_state.up_depth = round(st.session_state.up_depth * 0.30 + up_depth * 0.70, 2)
+st.session_state.up_flow  = round(st.session_state.up_flow  * 0.30 + up_flow  * 0.70, 1)
+
+# Status labels
+lo_depth_lbl, lo_depth_clr = stage_status(st.session_state.lo_depth, LO_BANKFULL)
+up_depth_lbl, up_depth_clr = stage_status(st.session_state.up_depth, UP_BANKFULL)
+lo_flow_lbl,  lo_flow_clr  = flow_status(st.session_state.lo_flow,  40,  150, 800)
+up_flow_lbl,  up_flow_clr  = flow_status(st.session_state.up_flow,  20,   75, 450)
 
 
-# ─────────────────────────────────────────────
-#  6. RENDER
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#  7. RENDER
+# ═══════════════════════════════════════════════════════════════════════════════
 
-# HEADER
+# ── HEADER ────────────────────────────────────────────────────────────────────
 st.markdown(f"""
 <div class="site-header">
   <div class="site-title">NOAH: CULLOWHEE CREEK FLOOD WARNING</div>
@@ -499,31 +554,32 @@ st.markdown(f"""
     Cullowhee Creek Watershed &mdash; Jackson County, NC
     &nbsp;|&nbsp;
     {datetime.now().strftime("%A, %B %d %Y")} &mdash; {datetime.now().strftime("%H:%M:%S")}
+    &nbsp;|&nbsp; TWO-POINT WATERSHED MODEL (PRE-SENSOR)
   </div>
 </div>""", unsafe_allow_html=True)
 
-# FLOOD THREAT BANNER
+
+# ── PANEL 1: FLOOD THREAT BANNER ──────────────────────────────────────────────
 st.markdown(f"""
-<div style="background:{t_bg}; border:2px solid {t_color}; border-radius:10px;
+<div style="background:{t_bg}; border:2px solid {t_clr}; border-radius:10px;
             padding:22px 30px; margin-bottom:16px; text-align:center;">
   <div style="font-family:'Share Tech Mono',monospace; font-size:0.75em;
-              color:{t_color}; letter-spacing:4px; margin-bottom:6px;">
+              color:{t_clr}; letter-spacing:4px; margin-bottom:6px;">
     COMPOSITE FLOOD THREAT SCORE
   </div>
-  <div style="font-size:3.5em; font-weight:700; color:{t_color};
+  <div style="font-size:3.5em; font-weight:700; color:{t_clr};
               letter-spacing:5px; line-height:1.0;">
-    {t_label}
+    {t_lbl}
   </div>
-
   <div style="background:rgba(255,255,255,0.08); border-radius:6px;
               height:8px; margin:12px auto; max-width:500px;">
-    <div style="background:{t_color}; width:{threat_score}%; height:8px; border-radius:6px;"></div>
+    <div style="background:{t_clr}; width:{threat}%; height:8px; border-radius:6px;"></div>
   </div>
   <div style="font-family:'Share Tech Mono',monospace; font-size:0.72em;
               color:#7AACCC; margin-top:6px;">
-    SOIL SAT {soil_sat:.2f}%
+    SOIL SAT {soil_sat:.1f}%
     &nbsp;&middot;&nbsp; QPF(24h) {qpf_24h:.2f}&quot;
-    &nbsp;&middot;&nbsp; PoP {pop_24h:.2f}%
+    &nbsp;&middot;&nbsp; PoP {pop_24h:.0f}%
   </div>
   <div style="font-family:'Share Tech Mono',monospace; font-size:0.68em;
               color:#3A6A8A; margin-top:10px; letter-spacing:1px;">
@@ -531,100 +587,185 @@ st.markdown(f"""
   </div>
 </div>""", unsafe_allow_html=True)
 
-# ROW 1: ATMOSPHERIC CONDITIONS
-st.markdown('<div class="panel"><div class="panel-title">ATMOSPHERIC CONDITIONS &mdash; NOAA / NWS GROUND TRUTH</div>', unsafe_allow_html=True)
-if not noaa["ok"]:
-    st.warning("METAR feed unavailable (K24A) — values may be stale")
+
+# ── PANEL 2: ATMOSPHERIC CONDITIONS ──────────────────────────────────────────
+st.markdown('<div class="panel"><div class="panel-title">ATMOSPHERIC CONDITIONS &mdash; OPEN-METEO HRRR / ECMWF ERA5-LAND</div>', unsafe_allow_html=True)
 c1, c2, c3, c4, c5 = st.columns(5)
-with c1: st.plotly_chart(make_dial(noaa["wind"],  "WIND SPEED",      0,  50,  " mph",  "#5AC8FA", src="K24A METAR"), use_container_width=True)
-with c2: st.plotly_chart(make_dial(noaa["hum"],   "HUMIDITY",        0, 100,  "%",     "#0077FF", src="K24A METAR"), use_container_width=True)
-with c3: st.plotly_chart(make_dial(noaa["temp"],  "TEMPERATURE",     0, 110,  " F",    "#FF3333", src="OPEN-METEO"), use_container_width=True)
-with c4: st.plotly_chart(make_dial(rain_24h, "RAIN (24H)", 0, 10, '"',  "#0077FF", sub="24-Hour Accumulation", src="OPEN-METEO HRRR"), use_container_width=True)
-with c5: st.plotly_chart(make_dial(soil_sat, "SOIL SATURATION", 0, 100, "%", "#0077FF", sub=f'{soil_in:.2f}" Stored | ERA5-Land', src="ECMWF ERA5-LAND"), use_container_width=True)
+with c1: st.plotly_chart(make_dial(noaa["wind"],  "WIND SPEED",     0,  50, " mph", "#5AC8FA", src="OPEN-METEO"), use_container_width=True)
+with c2: st.plotly_chart(make_dial(noaa["hum"],   "HUMIDITY",       0, 100, "%",    "#0077FF", src="OPEN-METEO"), use_container_width=True)
+with c3: st.plotly_chart(make_dial(noaa["temp"],  "TEMPERATURE",    0, 110, " F",   "#FF3333", src="OPEN-METEO"), use_container_width=True)
+with c4: st.plotly_chart(make_dial(rain_24h, "RAIN (24H)", 0, 10, '"', "#0077FF", sub="24-Hour Accumulation", src="HRRR BEST MATCH"), use_container_width=True)
+with c5: st.plotly_chart(make_dial(soil_sat, "SOIL SATURATION", 0, 100, "%", "#0077FF", sub=f'{soil_stored:.2f}" Stored | ERA5-Land', src="ECMWF ERA5-LAND"), use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ROW 2: CULLOWHEE CREEK
-st.markdown('<div class="panel"><div class="panel-title">CULLOWHEE CREEK &mdash; WATERSHED MODEL (PRE-SENSOR)</div>', unsafe_allow_html=True)
-h1, h2, h3 = st.columns([2, 2, 3])
 
-# Depth status thresholds (ft) — NCCAT point, estimated bankfull ~5.5ft
-_d = st.session_state.depth
-_q = st.session_state.flow
-if _d < 2.5:   _depth_lbl, _depth_clr = "LOW FLOW",  "#00FF9C"
-elif _d < 4.0: _depth_lbl, _depth_clr = "NORMAL",    "#00FF9C"
-elif _d < 5.5: _depth_lbl, _depth_clr = "ELEVATED",  "#FFFF00"
-elif _d < 6.5: _depth_lbl, _depth_clr = "WATCH",     "#FFD700"
-else:          _depth_lbl, _depth_clr = "FLOOD",     "#FF3333"
+# ── PANEL 3: UPPER WATERSHED — HEADWATERS ────────────────────────────────────
+st.markdown(
+    f'<div class="upper-panel"><div class="upper-title">'
+    f'UPPER CULLOWHEE CREEK &mdash; HEADWATERS SUB-BASIN '
+    f'({UP_AREA_ACRES:,} AC | CN={UP_CN_II} | Tc={UP_TC_HRS}h) '
+    f'&nbsp;|&nbsp; FLOOD LEAD TIME TO NCCAT: ~{FLOOD_TRAVEL_MIN} MIN'
+    f'</div>',
+    unsafe_allow_html=True
+)
+u1, u2, u3 = st.columns([2, 2, 3])
+with u1:
+    st.components.v1.html(make_stream_gauge(
+        "g_up_depth", st.session_state.up_depth,
+        "STREAM DEPTH", 0.0, 6.0, " ft",
+        [{"range": [0.0, 2.5], "color": "rgba(0,255,156,0.15)"},
+         {"range": [2.5, 3.8], "color": "rgba(255,255,0,0.20)"},
+         {"range": [3.8, 6.0], "color": "rgba(255,51,51,0.25)"}],
+        up_depth_clr, up_depth_lbl, up_depth_clr,
+        f"Stage: {st.session_state.up_depth:.2f} ft  |  Bankfull: {UP_BANKFULL} ft",
+        "SCS-CN / RATIONAL METHOD"
+    ), height=230)
+with u2:
+    st.components.v1.html(make_stream_gauge(
+        "g_up_flow", st.session_state.up_flow,
+        "DISCHARGE", 0.0, 600.0, " cfs",
+        [{"range": [0.0,   75.0], "color": "rgba(0,255,156,0.15)"},
+         {"range": [75.0, 200.0], "color": "rgba(255,255,0,0.20)"},
+         {"range": [200.0,600.0], "color": "rgba(255,51,51,0.25)"}],
+        up_flow_clr, up_flow_lbl, up_flow_clr,
+        f"Q: {st.session_state.up_flow:.1f} cfs  |  Q=18·D^2.15",
+        "RATIONAL METHOD"
+    ), height=230)
+with u3:
+    st.markdown('<div style="transform:scale(0.64); transform-origin:top left; width:156%;">', unsafe_allow_html=True)
+    st.markdown("**UPPER SUB-WATERSHED PARAMETERS**")
+    ua, ub = st.columns(2)
+    ua.metric("Drainage Area",    f"{UP_AREA_ACRES:,} ac",      "~40% of total")
+    ub.metric("SCS Curve No.",    f"CN {UP_CN_II}",              "Dense forest / AMC-II")
+    uc, ud = st.columns(2)
+    uc.metric("Modeled Q",        f"{st.session_state.up_flow:.1f} cfs")
+    ud.metric("Modeled Depth",    f"{st.session_state.up_depth:.2f} ft")
+    ue, uf = st.columns(2)
+    ue.metric("Flood Lead Time",  f"~{FLOOD_TRAVEL_MIN} min",   "to NCCAT outlet")
+    uf.metric("Time of Conc.",    f"{UP_TC_HRS} hr",             "Kirpich estimate")
+    st.caption("Pre-calibration | K = Q_obs/Q_mod corrects post-deployment | Sensor: upper Cullowhee Creek bridge")
+    st.markdown('</div>', unsafe_allow_html=True)
+st.markdown('</div>', unsafe_allow_html=True)
 
-if _q < 40:    _flow_lbl,  _flow_clr  = "LOW FLOW",  "#00FF9C"
-elif _q < 150: _flow_lbl,  _flow_clr  = "NORMAL",    "#00FF9C"
-elif _q < 400: _flow_lbl,  _flow_clr  = "ELEVATED",  "#FFFF00"
-elif _q < 800: _flow_lbl,  _flow_clr  = "HIGH",      "#FFD700"
-else:          _flow_lbl,  _flow_clr  = "FLOOD",     "#FF3333"
 
-with h1:
-    st.components.v1.html(make_animated_gauge_html(
-        "g_depth", st.session_state.depth,
+# ── PANEL 4: LOWER WATERSHED — NCCAT OUTLET ──────────────────────────────────
+st.markdown(
+    f'<div class="lower-panel"><div class="lower-title">'
+    f'LOWER CULLOWHEE CREEK &mdash; FULL WATERSHED OUTLET AT NCCAT '
+    f'({LO_AREA_ACRES:,} AC | CN={LO_CN_II} | Tc={LO_TC_HRS}h)'
+    f'</div>',
+    unsafe_allow_html=True
+)
+l1, l2, l3 = st.columns([2, 2, 3])
+with l1:
+    st.components.v1.html(make_stream_gauge(
+        "g_lo_depth", st.session_state.lo_depth,
         "STREAM DEPTH", 0.0, 8.0, " ft",
         [{"range": [0.0, 4.0], "color": "rgba(0,255,156,0.15)"},
          {"range": [4.0, 5.5], "color": "rgba(255,255,0,0.20)"},
          {"range": [5.5, 8.0], "color": "rgba(255,51,51,0.25)"}],
-        _depth_clr, _depth_lbl, _depth_clr,
-        f"Stage: {st.session_state.depth:.2f} ft  |  Bankfull: ~5.5 ft", "SCS-CN MODEL"
+        lo_depth_clr, lo_depth_lbl, lo_depth_clr,
+        f"Stage: {st.session_state.lo_depth:.2f} ft  |  Bankfull: {LO_BANKFULL} ft",
+        "SCS-CN / RATIONAL METHOD"
     ), height=230)
-with h2:
-    st.components.v1.html(make_animated_gauge_html(
-        "g_flow", st.session_state.flow,
+with l2:
+    st.components.v1.html(make_stream_gauge(
+        "g_lo_flow", st.session_state.lo_flow,
         "DISCHARGE", 0.0, 1000.0, " cfs",
         [{"range": [0.0,   150.0], "color": "rgba(0,255,156,0.15)"},
          {"range": [150.0, 400.0], "color": "rgba(255,255,0,0.20)"},
          {"range": [400.0,1000.0], "color": "rgba(255,51,51,0.25)"}],
-        _flow_clr, _flow_lbl, _flow_clr,
-        f"Q: {st.session_state.flow:.1f} cfs  |  Rating curve: Q=44·D^2.3", "RATIONAL METHOD"
+        lo_flow_clr, lo_flow_lbl, lo_flow_clr,
+        f"Q: {st.session_state.lo_flow:.1f} cfs  |  Q=44·D^2.3",
+        "RATIONAL METHOD"
     ), height=230)
-with h3:
-    if sm_ok and sm_07 is not None:
-        # Clamp: ERA5-Land can report moisture above theoretical porosity
-        sm_07_c   = min(sm_07,  SOIL_POROSITY)
-        sm_728_c  = min(sm_728, SOIL_POROSITY)
-        sm_range  = SOIL_POROSITY - SOIL_WILT_PT
-        sm_07_pct  = round(max(0, min(100, (sm_07_c  - SOIL_WILT_PT) / sm_range * 100)), 1)
-        sm_728_pct = round(max(0, min(100, (sm_728_c - SOIL_WILT_PT) / sm_range * 100)), 1)
-        sm_ts_label = sm_ts[:13].replace("T", " ") + " UTC" if sm_ts else "---"
-        src_line = f"ECMWF ERA5-LAND  |  Valid: {sm_ts_label}"
-    else:
-        sm_07_c, sm_728_c = 0.0, 0.0
-        sm_07_pct, sm_728_pct = 0.0, 0.0
-        src_line = "ERA5-LAND unavailable — proxy mode"
-
+with l3:
     st.markdown('<div style="transform:scale(0.64); transform-origin:top left; width:156%;">', unsafe_allow_html=True)
-    st.markdown("**SOIL MOISTURE — ERA5-LAND**")
-    ma, mb = st.columns(2)
-    ma.metric("0–7 cm (surface)",    f"{sm_07_c:.3f} m³/m³",  f"{sm_07_pct:.1f}% sat")
-    mb.metric("7–28 cm (root zone)", f"{sm_728_c:.3f} m³/m³", f"{sm_728_pct:.1f}% sat")
-
-    mc, md = st.columns(2)
-    mc.metric("Stored Water",    f'{soil_in:.2f}"',  "0–35 cm profile")
-    md.metric("Saturation",      f"{soil_sat:.1f}%", "of pore capacity")
-
-    st.caption(f"ECMWF ERA5-Land  |  Valid: {sm_ts_label if sm_ok and sm_07 is not None else 'proxy mode'}")
+    st.markdown("**SOIL MOISTURE — ECMWF ERA5-LAND**")
+    la, lb = st.columns(2)
+    la.metric("0–7 cm (surface)",    f"{sm_07_c:.3f} m³/m³",  f"{sm_07_pct:.1f}% sat")
+    lb.metric("7–28 cm (root zone)", f"{sm_728_c:.3f} m³/m³", f"{sm_728_pct:.1f}% sat")
+    lc, ld = st.columns(2)
+    lc.metric("Stored Water",        f'{soil_stored:.2f}"',    "0–35 cm profile")
+    ld.metric("Saturation",          f"{soil_sat:.1f}%",       "of pore capacity")
+    st.caption(f"ECMWF ERA5-Land  |  Valid: {sm_ts_str}")
     st.markdown('</div>', unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ROW 3: 7-DAY FLOOD OUTLOOK
+
+# ── PANEL 5: WATERSHED COMPARISON ────────────────────────────────────────────
+st.markdown('<div class="panel"><div class="panel-title">WATERSHED COMPARISON &mdash; UPPER vs LOWER SUB-BASIN | CULLOWHEE CREEK</div>', unsafe_allow_html=True)
+
+# Compute delta values
+dq  = round(st.session_state.lo_flow  - st.session_state.up_flow,  1)
+dd  = round(st.session_state.lo_depth - st.session_state.up_depth, 2)
+dq_pct = round((dq / st.session_state.up_flow * 100) if st.session_state.up_flow > 0 else 0, 1)
+
+comp_clr_up = up_depth_clr
+comp_clr_lo = lo_depth_clr
+
+st.markdown(f"""
+<div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; margin-bottom:8px;">
+
+  <div style="background:rgba(0,180,100,0.07); border:1px solid rgba(0,180,100,0.25);
+              border-radius:8px; padding:16px; text-align:center;">
+    <div style="font-family:'Share Tech Mono',monospace; font-size:0.72em; color:#00CC77;
+                letter-spacing:2px; margin-bottom:8px;">UPPER — HEADWATERS</div>
+    <div style="font-size:0.75em; color:#7AACCC; margin-bottom:4px;">{UP_AREA_ACRES:,} ac | CN={UP_CN_II} | Tc={UP_TC_HRS}h</div>
+    <div style="font-size:2.2em; font-weight:700; color:{comp_clr_up};">{st.session_state.up_depth:.2f} ft</div>
+    <div style="font-size:1.1em; color:{up_flow_clr};">{st.session_state.up_flow:.1f} cfs</div>
+    <div style="font-family:'Share Tech Mono',monospace; font-size:0.72em; color:{comp_clr_up};
+                margin-top:6px; letter-spacing:2px;">{up_depth_lbl}</div>
+    <div style="font-size:0.72em; color:#445566; margin-top:4px;">Bankfull: {UP_BANKFULL} ft</div>
+  </div>
+
+  <div style="background:rgba(0,100,200,0.07); border:1px solid rgba(0,119,255,0.20);
+              border-radius:8px; padding:16px; text-align:center;">
+    <div style="font-family:'Share Tech Mono',monospace; font-size:0.72em; color:#0077FF;
+                letter-spacing:2px; margin-bottom:8px;">DELTA (LOWER &minus; UPPER)</div>
+    <div style="font-size:0.75em; color:#7AACCC; margin-bottom:4px;">Watershed response amplification</div>
+    <div style="font-size:2.2em; font-weight:700; color:#FFFF00;">{'+' if dd >= 0 else ''}{dd:.2f} ft</div>
+    <div style="font-size:1.1em; color:#FFFF00;">{'+' if dq >= 0 else ''}{dq:.1f} cfs ({'+' if dq_pct >= 0 else ''}{dq_pct:.1f}%)</div>
+    <div style="font-family:'Share Tech Mono',monospace; font-size:0.68em; color:#3A6A8A;
+                margin-top:10px; line-height:1.6;">
+      FLOOD TRAVEL TIME<br>
+      <span style="color:#FFFF00; font-size:1.2em;">~{FLOOD_TRAVEL_MIN} MIN</span><br>
+      UPPER &rarr; NCCAT
+    </div>
+    <div style="font-size:0.68em; color:#2A5070; margin-top:6px;">Pre-cal estimate | Will update on first event</div>
+  </div>
+
+  <div style="background:rgba(0,100,200,0.07); border:1px solid rgba(0,119,255,0.25);
+              border-radius:8px; padding:16px; text-align:center;">
+    <div style="font-family:'Share Tech Mono',monospace; font-size:0.72em; color:#0099FF;
+                letter-spacing:2px; margin-bottom:8px;">LOWER — NCCAT OUTLET</div>
+    <div style="font-size:0.75em; color:#7AACCC; margin-bottom:4px;">{LO_AREA_ACRES:,} ac | CN={LO_CN_II} | Tc={LO_TC_HRS}h</div>
+    <div style="font-size:2.2em; font-weight:700; color:{comp_clr_lo};">{st.session_state.lo_depth:.2f} ft</div>
+    <div style="font-size:1.1em; color:{lo_flow_clr};">{st.session_state.lo_flow:.1f} cfs</div>
+    <div style="font-family:'Share Tech Mono',monospace; font-size:0.72em; color:{comp_clr_lo};
+                margin-top:6px; letter-spacing:2px;">{lo_depth_lbl}</div>
+    <div style="font-size:0.72em; color:#445566; margin-top:4px;">Bankfull: {LO_BANKFULL} ft</div>
+  </div>
+
+</div>
+<div style="font-family:'Share Tech Mono',monospace; font-size:0.68em; color:#2A5070;
+            text-align:center; margin-top:6px; letter-spacing:1px;">
+  MODEL: SCS-CN + RATIONAL METHOD + MANNING'S RATING CURVE &middot; ERA5-LAND SOIL MOISTURE &middot;
+  CALIBRATION: K = Q<sub>obs</sub>/Q<sub>mod</sub> POST-SENSOR DEPLOYMENT
+</div>
+""", unsafe_allow_html=True)
+st.markdown('</div>', unsafe_allow_html=True)
+
+
+# ── PANEL 6: 7-DAY FLOOD OUTLOOK ─────────────────────────────────────────────
 st.markdown('<div class="panel"><div class="panel-title">7-DAY FLOOD &amp; RAINFALL OUTLOOK &mdash; CULLOWHEE CREEK WATERSHED (NWS GSP GRIDPOINT)</div>', unsafe_allow_html=True)
 if not fc_ok:
     st.warning(f"NWS forecast unavailable — {fc_err}")
 elif forecast:
     pcols = st.columns(7)
     for i, d in enumerate(forecast):
-        risk      = min(100.0, round((soil_sat * 0.35) + (d["pop"] * 0.35) + (d["qpf"] * 20), 2))
-        color     = "#00FF9C" if risk < 30 else "#FFFF00" if risk < 50 else "#FFD700" if risk < 65 else "#FF8800" if risk < 80 else "#FF3333"
-        icon      = nws_icon(d["icon_txt"])
-        temp_str  = f"{d['temp']:.2f}"
-        qpf_str   = f"{d['qpf']:.2f}"
-        pop_str   = f"{d['pop']:.2f}"
-        risk_str  = f"{risk:.2f}"
+        risk  = min(100.0, round((soil_sat * 0.35) + (d["pop"] * 0.35) + (d["qpf"] * 20), 2))
+        color = "#00FF9C" if risk < 30 else "#FFFF00" if risk < 50 else "#FFD700" if risk < 65 else "#FF8800" if risk < 80 else "#FF3333"
         with pcols[i]:
             st.markdown(
                 '<div style="background:rgba(255,255,255,0.03); border-top:4px solid '
@@ -632,41 +773,25 @@ elif forecast:
                 + '; border-radius:8px; padding:12px 8px; text-align:center;">'
                 + '<div style="font-weight:700; font-size:1.1em;">' + d["short_name"] + '</div>'
                 + '<div style="font-size:0.75em; color:#5A7090; margin-bottom:4px;">' + d["date"] + '</div>'
-                + '<div style="font-family:\'Share Tech Mono\',monospace; font-size:0.75em; color:#7AACCC; margin-bottom:4px;">' + icon + '</div>'
-                + '<div style="color:' + color + '; font-size:1.55em; font-weight:700; margin:5px 0;">' + risk_str + '%</div>'
+                + '<div style="font-family:\'Share Tech Mono\',monospace; font-size:0.75em; color:#7AACCC; margin-bottom:4px;">' + nws_icon(d["icon_txt"]) + '</div>'
+                + '<div style="color:' + color + '; font-size:1.55em; font-weight:700; margin:5px 0;">' + f'{risk:.1f}' + '%</div>'
                 + '<div style="color:' + color + '; font-family:\'Share Tech Mono\',monospace; font-size:0.72em; letter-spacing:2px; margin-bottom:4px;">FLOOD RISK</div>'
-                + '<div style="color:#00FFCC; font-family:\'Share Tech Mono\',monospace; font-size:0.85em;">' + qpf_str + '&quot;</div>'
-                + '<div style="color:#7AACCC; font-size:0.75em;">' + pop_str + '% PoP</div>'
-                + '<div style="color:#7AACCC; font-size:0.75em;">' + temp_str + ' F</div>'
+                + '<div style="color:#00FFCC; font-family:\'Share Tech Mono\',monospace; font-size:0.85em;">' + f'{d["qpf"]:.2f}' + '&quot;</div>'
+                + '<div style="color:#7AACCC; font-size:0.75em;">' + f'{d["pop"]:.0f}' + '% PoP</div>'
+                + '<div style="color:#7AACCC; font-size:0.75em;">' + f'{d["temp"]:.0f}' + ' F</div>'
                 + '</div>',
                 unsafe_allow_html=True
             )
 st.markdown('</div>', unsafe_allow_html=True)
 
 
-# ROW 5: LIVE RADAR — NWS KGSP NEXRAD WSR-88D
-st.markdown('<div class="panel"><div class="panel-title">NEXRAD WSR-88D RADAR &mdash; KGSP GREENVILLE-SPARTANBURG</div>', unsafe_allow_html=True)
-
-import time as _time
-_cache_bust = int(_time.time() / 120)  # refresh every 2 min
-
-radar_html = f"""
-<div style="
-    background: #04090F;
-    border-radius: 10px;
-    border: 1px solid #1a2a3a;
-    overflow: hidden;
-    font-family: 'Courier New', monospace;
-">
-  <!-- Header bar -->
-  <div style="
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 8px 16px;
-      background: #0a1520;
-      border-bottom: 1px solid #1a3a5a;
-  ">
+# ── PANEL 7: NEXRAD WSR-88D RADAR (KGSP) ─────────────────────────────────────
+st.markdown('<div class="panel"><div class="panel-title">NEXRAD WSR-88D RADAR &mdash; KGSP GREENVILLE-SPARTANBURG (NWS OPERATIONAL)</div>', unsafe_allow_html=True)
+_cb = int(time.time() / 120)
+st.components.v1.html(f"""
+<div style="background:#04090F; border-radius:10px; border:1px solid #1a2a3a; overflow:hidden; font-family:'Courier New',monospace;">
+  <div style="display:flex; align-items:center; justify-content:space-between;
+              padding:8px 16px; background:#0a1520; border-bottom:1px solid #1a3a5a;">
     <div style="display:flex; align-items:center; gap:10px;">
       <div style="width:8px; height:8px; border-radius:50%; background:#00FF9C; box-shadow:0 0 6px #00FF9C;"></div>
       <span style="color:#00CFFF; font-size:11px; font-weight:700; letter-spacing:2px;">LIVE</span>
@@ -674,25 +799,13 @@ radar_html = f"""
     </div>
     <div style="color:#556677; font-size:10px; letter-spacing:1px;">AUTO-LOOP &#x21BB; 2 MIN</div>
   </div>
-
-  <!-- Radar image -->
   <div style="position:relative; background:#000; text-align:center;">
-    <img src="https://radar.weather.gov/ridge/standard/KGSP_loop.gif?v={_cache_bust}"
-         style="width:100%; max-height:520px; object-fit:contain; display:block;"
-         alt="KGSP NEXRAD Loop" />
-
-    <!-- Bottom legend bar -->
-    <div style="
-        position:absolute; bottom:0; left:0; right:0;
-        background: linear-gradient(transparent, rgba(0,0,0,0.85));
-        padding: 20px 16px 8px;
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-end;
-    ">
-      <div style="color:#667788; font-size:10px; letter-spacing:1px;">
-        COVERAGE AREA: WNC &bull; SC UPSTATE &bull; NW GA &bull; SW VA
-      </div>
+    <img src="https://radar.weather.gov/ridge/standard/KGSP_loop.gif?v={_cb}"
+         style="width:100%; max-height:520px; object-fit:contain; display:block;" alt="KGSP NEXRAD Loop" />
+    <div style="position:absolute; bottom:0; left:0; right:0;
+                background:linear-gradient(transparent,rgba(0,0,0,0.85));
+                padding:20px 16px 8px; display:flex; justify-content:space-between; align-items:flex-end;">
+      <div style="color:#667788; font-size:10px; letter-spacing:1px;">COVERAGE: WNC &bull; SC UPSTATE &bull; NW GA &bull; SW VA</div>
       <div style="display:flex; gap:4px; align-items:center;">
         <span style="color:#556677; font-size:9px; margin-right:4px;">dBZ</span>
         <span style="display:inline-block; width:18px; height:10px; background:#04e9e7;"></span>
@@ -707,20 +820,11 @@ radar_html = f"""
       </div>
     </div>
   </div>
-
-  <!-- Footer -->
-  <div style="
-      padding: 6px 16px;
-      background: #0a1520;
-      border-top: 1px solid #1a3a5a;
-      display: flex;
-      justify-content: space-between;
-  ">
+  <div style="padding:6px 16px; background:#0a1520; border-top:1px solid #1a3a5a;
+              display:flex; justify-content:space-between;">
     <span style="color:#445566; font-size:10px; letter-spacing:1px;">SRC: radar.weather.gov &bull; NWS OPERATIONAL DATA</span>
-    <span style="color:#445566; font-size:10px; letter-spacing:1px;">JACKSON CO. WATERSHED MONITORING SYSTEM</span>
+    <span style="color:#445566; font-size:10px; letter-spacing:1px;">JACKSON CO. WATERSHED MONITORING SYSTEM &bull; NEMO / WCU</span>
   </div>
 </div>
-"""
-
-st.components.v1.html(radar_html, height=610)
+""", height=610)
 st.markdown('</div>', unsafe_allow_html=True)
