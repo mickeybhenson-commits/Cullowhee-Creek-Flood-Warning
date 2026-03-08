@@ -980,7 +980,7 @@ st.markdown(f"""
 st.markdown('<div class="panel"><div class="panel-title">ATMOSPHERIC CONDITIONS &mdash; OPEN-METEO HRRR / ECMWF ERA5-LAND</div>', unsafe_allow_html=True)
 c1, c2, c3, c4, c5 = st.columns(5)
 with c1: st.plotly_chart(make_dial(noaa["wind"],  "WIND SPEED",     0,  50, " mph", "#5AC8FA", src="OPEN-METEO"), use_container_width=True)
-with c2: st.plotly_chart(make_dial(travel_min, "WAVE TRAVEL", 15, 90, " min", _tw_clr, sub="UPPER → WCU CAMPUS", src="KINEMATIC WAVE MODEL"), use_container_width=True)
+with c2: st.plotly_chart(make_dial(travel_min, "WAVE TRAVEL", 15, 90, " min", _tw_clr, sub="UPPER → LOWER", src="KINEMATIC WAVE MODEL"), use_container_width=True)
 with c3: st.plotly_chart(make_dial(noaa["temp"],  "TEMPERATURE",    0, 110, " F",   "#FF3333", src="OPEN-METEO"), use_container_width=True)
 with c4: st.plotly_chart(make_dial(rain_24h, "RAIN (24H)", 0, 10, '"', "#0077FF", sub="24-Hour Accumulation", src="HRRR BEST MATCH"), use_container_width=True)
 with c5: st.plotly_chart(make_dial(soil_sat, "SOIL SATURATION", 0, 100, "%", "#0077FF", sub=f'{soil_stored:.2f}" Stored | ERA5-Land', src="ECMWF ERA5-LAND"), use_container_width=True)
@@ -1081,7 +1081,7 @@ with u3:
 st.markdown('</div>', unsafe_allow_html=True)
 
 
-# ── PANEL 4: LOWER WATERSHED — WCU CAMPUS ──────────────────────────────────
+# ── PANEL 4: LOWER WATERSHED — LOWER ──────────────────────────────────
 # Gauge arc ranges anchored to Ecoregion 66 bankfull stage (2.87 ft)
 _lo_bkf  = LO_BANKFULL
 _lo_max  = _lo_bkf * 2.5
@@ -1276,7 +1276,7 @@ st.markdown(f"""
   <div style="background:rgba(0,100,200,0.07); border:1px solid rgba(0,119,255,0.25);
               border-radius:8px; padding:16px; text-align:center;">
     <div style="font-family:'Share Tech Mono',monospace; font-size:0.72em; color:#0099FF;
-                letter-spacing:2px; margin-bottom:8px;">LOWER — WCU CAMPUS</div>
+                letter-spacing:2px; margin-bottom:8px;">LOWER</div>
     <div style="font-size:0.75em; color:#7AACCC; margin-bottom:4px;">{LO_AREA_ACRES:,} ac | CN={LO_CN_II} | Tc={LO_TC_HRS}h</div>
     <div style="font-size:2.2em; font-weight:700; color:{comp_clr_lo};">{st.session_state.lo_depth:.2f} ft</div>
     <div style="font-size:1.1em; color:{lo_flow_clr};">{st.session_state.lo_flow:.1f} cfs</div>
