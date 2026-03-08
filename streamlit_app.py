@@ -804,10 +804,52 @@ rain_14d, rain_7d, snow_7d, rain_24h, rain_5d, _ = fetch_precip_history()
 sm_07, sm_728, sm_ts, sm_ok                       = fetch_era5_soil_moisture()
 usdm_level, usdm_label, usdm_date                 = fetch_usdm_drought()
 
-# ── Soil saturation — 3-source ensemble ──────────────────────────────────────
+# ── Soil saturation — 3-source ensemble (watershed-wide baseline) ─────────────
 soil_sat, soil_stored, soil_color, sm_sources = calc_soil_saturation_ensemble(
     sm_07, sm_728, sm_ok, rain_5d, usdm_level
 )
+
+# ── Sub-basin drainage correction ─────────────────────────────────────────────
+# ERA5-Land (~9 km grid) and USDM (county-level) cannot distinguish the upper
+# headwaters sub-basin from the lower outlet reach.  But the two sub-basins
+# have physically different antecedent saturation at steady state:
+#
+#   Upper headwaters (DA=3.875 mi², Tc=1.2h, CN=62):
+#     — Steeper slopes → faster lateral subsurface drainage between storms
+#     — Shallower Ultisol A-horizon over saprolite → less field-capacity storage
+#     — Higher elevation (~3,200 ft) → stronger hydraulic gradients
+#
+#   Lower outlet (DA=9.688 mi², Tc=2.5h, CN=68):
+#     — Flatter valley soils retain moisture longer
+#     — Deeper profiles with more storage
+#     — Retains ensemble value unchanged
+#
+# Correction factor is derived from two physical proxies already in the model:
+#   Tc ratio  (drainage speed):  sqrt(Tc_UP / Tc_LO) = sqrt(1.2/2.5) = 0.693
+#   CN ratio  (soil permeability): CN_UP / CN_LO      = 62/68        = 0.912
+#   Combined (60% Tc-based, 40% CN-based):
+#     _UP_DRAIN_FACTOR = 0.693×0.60 + 0.912×0.40 ≈ 0.781
+#
+# Effect: at soil_sat=70% → upper ≈ 55%;  at soil_sat=40% → upper ≈ 31%.
+# K-correction post-sensor deployment will supersede this estimate.
+_UP_DRAIN_FACTOR = (((UP_TC_HRS / LO_TC_HRS) ** 0.5) * 0.60 +
+                    (UP_CN_II   / LO_CN_II)            * 0.40)
+
+soil_sat_lo = soil_sat   # lower watershed retains ensemble value
+soil_sat_up = round(min(100.0, max(1.0, soil_sat * _UP_DRAIN_FACTOR)), 1)
+
+# Separate display helpers for each sub-basin
+def _sat_color(s):
+    return "#FF3333" if s > 85 else "#FF8800" if s > 70 else "#FFD700" if s > 50 else "#00FF9C"
+
+def _sat_stored(s):
+    """Approximate stored inches from saturation % using WNC Ultisol soil column."""
+    return round((s / 100.0) * (SOIL_POROSITY * 11.024), 2)
+
+soil_color_lo = _sat_color(soil_sat_lo)
+soil_color_up = _sat_color(soil_sat_up)
+soil_stored_lo = soil_stored   # already computed from ensemble
+soil_stored_up = _sat_stored(soil_sat_up)
 
 # ERA5 layer percentages for display card (if available)
 if sm_ok and sm_07 is not None:
@@ -826,19 +868,19 @@ else:
 qpf_24h = forecast[0]["qpf"] if forecast else 0.0
 pop_24h = forecast[0]["pop"] if forecast else 0.0
 
-# Composite flood threat
-threat      = flood_threat_score(soil_sat, qpf_24h, pop_24h)
+# Composite flood threat — uses lower (outlet) saturation as the operational value
+threat      = flood_threat_score(soil_sat_lo, qpf_24h, pop_24h)
 t_lbl, t_clr, t_bg = threat_meta(threat)
 
 # ── LOWER watershed model (full outlet, NCCAT) ────────────────────────────────
 lo_depth, lo_flow = model_stream(
-    soil_sat, rain_24h, qpf_24h, rain_7d,
+    soil_sat_lo, rain_24h, qpf_24h, rain_7d,
     LO_DA_SQMI, LO_TC_HRS, LO_CN_II, LO_BASEFLOW, LO_RATING_A, LO_RATING_B, LO_BANKFULL_Q
 )
 
 # ── UPPER watershed model (headwaters sub-basin) ─────────────────────────────
 up_depth, up_flow = model_stream(
-    soil_sat, rain_24h, qpf_24h, rain_7d,
+    soil_sat_up, rain_24h, qpf_24h, rain_7d,
     UP_DA_SQMI, UP_TC_HRS, UP_CN_II, UP_BASEFLOW, UP_RATING_A, UP_RATING_B, UP_BANKFULL_Q
 )
 
@@ -900,7 +942,7 @@ st.markdown(f"""
   </div>
   <div style="font-family:'Share Tech Mono',monospace; font-size:0.72em;
               color:#7AACCC; margin-top:6px;">
-    SOIL SAT {soil_sat:.1f}%
+    SOIL SAT (LOWER) {soil_sat_lo:.1f}% &nbsp;&middot;&nbsp; (UPPER) {soil_sat_up:.1f}%
     &nbsp;&middot;&nbsp; QPF(24h) {qpf_24h:.2f}&quot;
     &nbsp;&middot;&nbsp; PoP {pop_24h:.0f}%
     &nbsp;&middot;&nbsp; LOWER {lo_bkf_pct:.0f}% of bankfull
@@ -977,10 +1019,14 @@ with u3:
               border-bottom:1px solid rgba(0,180,100,0.2); padding-bottom:6px;">
     SOIL SATURATION &mdash; 3-SOURCE ENSEMBLE
   </div>
-  <div style="font-size:2.5em; font-weight:700; color:{soil_color}; text-align:center;
-              margin:6px 0 4px;">{soil_sat:.1f}%</div>
-  <div style="font-size:0.7em; color:#5AACD0; text-align:center; margin-bottom:12px;">
-    stored: {soil_stored:.2f}&quot; &nbsp;|&nbsp; pore capacity
+  <div style="font-size:2.5em; font-weight:700; color:{soil_color_up}; text-align:center;
+              margin:6px 0 4px;">{soil_sat_up:.1f}%</div>
+  <div style="font-size:0.7em; color:#5AACD0; text-align:center; margin-bottom:8px;">
+    stored: {soil_stored_up:.2f}&quot; &nbsp;|&nbsp; pore capacity
+  </div>
+  <div style="font-size:0.63em; color:#3A7050; text-align:center; margin-bottom:10px;
+              font-style:italic;">
+    watershed avg {soil_sat_lo:.1f}% &times; drain factor {_UP_DRAIN_FACTOR:.3f}
   </div>
   <div style="display:grid; grid-template-columns:auto 1fr auto; gap:3px 8px;
               font-size:0.68em; align-items:center;">
@@ -1067,10 +1113,10 @@ with l3:
               border-bottom:1px solid rgba(0,119,255,0.2); padding-bottom:6px;">
     SOIL SATURATION — 3-SOURCE ENSEMBLE
   </div>
-  <div style="font-size:2.5em; font-weight:700; color:{soil_color}; text-align:center;
-              margin:6px 0 4px;">{soil_sat:.1f}%</div>
+  <div style="font-size:2.5em; font-weight:700; color:{soil_color_lo}; text-align:center;
+              margin:6px 0 4px;">{soil_sat_lo:.1f}%</div>
   <div style="font-size:0.7em; color:#5AACD0; text-align:center; margin-bottom:12px;">
-    stored: {soil_stored:.2f}&quot; &nbsp;|&nbsp; pore capacity
+    stored: {soil_stored_lo:.2f}&quot; &nbsp;|&nbsp; pore capacity
   </div>
   <div style="display:grid; grid-template-columns:auto 1fr auto; gap:3px 8px;
               font-size:0.68em; align-items:center;">
@@ -1242,7 +1288,7 @@ if not fc_ok:
 elif forecast:
     pcols = st.columns(7)
     for i, d in enumerate(forecast):
-        risk  = min(100.0, round((soil_sat * 0.35) + (d["pop"] * 0.35) + (d["qpf"] * 20), 2))
+        risk  = min(100.0, round((soil_sat_lo * 0.35) + (d["pop"] * 0.35) + (d["qpf"] * 20), 2))
         color = "#00FF9C" if risk < 30 else "#FFFF00" if risk < 50 else "#FFD700" if risk < 65 else "#FF8800" if risk < 80 else "#FF3333"
         with pcols[i]:
             st.markdown(
