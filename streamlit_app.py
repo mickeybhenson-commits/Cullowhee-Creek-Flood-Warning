@@ -597,7 +597,7 @@ with h3:
         sm_07_pct, sm_728_pct = 0.0, 0.0
         src_line = "ERA5-LAND unavailable — proxy mode"
 
-    st.markdown('<div style="transform:scale(0.80); transform-origin:top left; width:125%;">', unsafe_allow_html=True)
+    st.markdown('<div style="transform:scale(0.64); transform-origin:top left; width:156%;">', unsafe_allow_html=True)
     st.markdown("**SOIL MOISTURE — ERA5-LAND**")
     ma, mb = st.columns(2)
     ma.metric("0–7 cm (surface)",    f"{sm_07_c:.3f} m³/m³",  f"{sm_07_pct:.1f}% sat")
