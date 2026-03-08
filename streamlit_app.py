@@ -10,6 +10,18 @@ Architecture: Two-point sub-watershed model (pre-sensor)
 Flood wave travel time UPPER → LOWER: ~65 min (pre-calibration estimate)
 Post-deployment: K = Q_observed / Q_modeled calibrates both points independently.
 
+Hydraulic geometry baseline — ECOREGION 66 BLUE RIDGE COMPOSITE CURVES:
+  Source: Harman et al. (2000) NC Mountain Streams + SCDNR Ecoregion 66 (May 2020)
+  50 stable reference reaches across Southern Blue Ridge physiographic province.
+  Regression forms:  Qbkf = 35.0 × DA^0.850  (cfs, DA in mi²)
+                     Wbkf = 12.5 × DA^0.460  (ft)
+                     Dbkf = 1.05 × DA^0.310  (ft, mean riffle depth)
+  Applied to derive rating curve A, bankfull stage, and channel width for both sub-basins.
+  K-correction (Q_obs/Q_mod) will supersede regional priors after 10–15 storm events.
+  Caveat: Southern Blue Ridge hydraulic geometry is also influenced by watershed slope
+    and local channel characteristics beyond drainage area alone (Carey et al. 2023,
+    IJRBM — "Drainage area is not enough"). Individual reach scatter ≈ ±40-60%.
+
 Data sources:
   - Atmospheric:   Open-Meteo HRRR/GFS (real-time, no API key)
   - Soil moisture: 3-SOURCE ENSEMBLE:
@@ -71,6 +83,9 @@ html, body, .stApp { background-color: #04090F; color: #E0E8F0; font-family: 'Ra
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  2. WATERSHED & SOIL CONSTANTS
+#     Rating curve A coefficients and bankfull stage derived from Ecoregion 66
+#     Blue Ridge regional curves (see Section 2.5 below).
+#     B exponents remain Manning's-derived for cobble/gravel mountain channels.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ── Soil physics — WNC Ultisols (Evard-Cowee-Plott series, SSURGO) ────────────
@@ -79,31 +94,125 @@ SOIL_FIELD_CAP = 0.286   # m³/m³ — field capacity (gravity drainage complete
 SOIL_WILT_PT   = 0.151   # m³/m³ — permanent wilting point (plant-unavailable)
 
 # ── LOWER sub-watershed: Full outlet at NCCAT ─────────────────────────────────
-# Drains entire Cullowhee Creek watershed. Sensor target: NCCAT bridge/staff gauge.
-# Source: HUC-12 delineation, NLCD 2021, SSURGO, Kirpich Tc formula.
-LO_AREA_ACRES = 6200     # Total watershed drainage area to NCCAT (ac)
-LO_TC_HRS     = 2.5      # Time of concentration (hr) — Kirpich estimate
-LO_CN_II      = 68       # SCS CN AMC-II: forested Ultisol, ~20% impervious
-LO_RATING_A   = 44.0     # Rating curve Q = A * D^B — coefficient
-LO_RATING_B   = 2.30     # Rating curve exponent (Manning's-derived, cobble channel)
-LO_BASEFLOW   = 9.0      # Low-season baseflow estimate at NCCAT (cfs)
-LO_BANKFULL   = 5.5      # Estimated bankfull stage at NCCAT (ft)
-LO_WIDTH_FT   = 28.0     # Bankfull channel width at NCCAT (ft)
-LO_MANN_N     = 0.045    # Manning's n — natural cobble/gravel mountain stream
+# Drains entire Cullowhee Creek watershed. Sensor target: NCCAT bridge.
+# Hydraulic geometry anchored to Ecoregion 66 composite curves:
+#   DA = 6200 ac / 640 = 9.688 mi² →  Qbkf=241 cfs | Wbkf=35.5 ft | Dbkf_mean=2.12 ft
+#   Bankfull stage (gauge) = Dbkf_mean × 1.35 (B/C cobble depth-ratio) = 2.87 ft
+#   Rating A = Qbkf / stage^B = 241.2 / 2.87^2.30 = 21.4
+LO_AREA_ACRES    = 6200      # Total watershed drainage area to NCCAT (ac)
+LO_DA_SQMI       = 9.688     # Drainage area in square miles (6200/640)
+LO_TC_HRS        = 2.5       # Time of concentration (hr) — Kirpich estimate
+LO_CN_II         = 68        # SCS CN AMC-II: forested Ultisol, ~20% impervious
+LO_RATING_A      = 21.4      # Rating curve Q = A·D^B — coefficient
+                              #   Derived: Qbkf(E66) = 241.2 cfs @ bankfull stage 2.87 ft
+LO_RATING_B      = 2.30      # Rating curve exponent (Manning's-derived, cobble channel)
+LO_BASEFLOW      = 9.0       # Low-season baseflow estimate at NCCAT (cfs)
+LO_BANKFULL      = 2.87      # Bankfull stage at NCCAT (ft) — Ecoregion 66 derived
+LO_BANKFULL_Q    = 241.2     # Bankfull discharge (cfs) — Ecoregion 66 composite curve
+LO_BANKFULL_MEAND = 2.12     # Bankfull mean riffle depth (ft) — Ecoregion 66 regression
+LO_WIDTH_FT      = 35.5      # Bankfull channel width (ft) — Ecoregion 66 derived
+LO_MANN_N        = 0.045     # Manning's n — natural cobble/gravel mountain stream
 
 # ── UPPER sub-watershed: Headwaters above WCU campus ─────────────────────────
 # Steeper, denser forest, higher elevation (~3,200 ft). Faster response time.
 # Sensor target: upper Cullowhee Creek bridge near headwaters.
-# Flood wave travel time UPPER → LOWER: ~65 min (will be calibrated from
-#   cross-correlation of sensor peaks on first observed flood event).
-UP_AREA_ACRES    = 2480  # Upper sub-basin drainage area (~40% of total) (ac)
-UP_TC_HRS        = 1.2   # Shorter Tc — steeper gradient, smaller basin (hr)
-UP_CN_II         = 62    # Lower CN — denser canopy, less development
-UP_RATING_A      = 18.0  # Upper rating curve coefficient
-UP_RATING_B      = 2.15  # Upper rating curve exponent
-UP_BASEFLOW      = 3.5   # Low-season baseflow estimate at headwaters (cfs)
-UP_BANKFULL      = 3.8   # Estimated bankfull stage at headwaters (ft)
-FLOOD_TRAVEL_MIN = 65    # Flood wave travel time UPPER → NCCAT (min, pre-cal)
+# Hydraulic geometry anchored to Ecoregion 66 composite curves:
+#   DA = 2480 ac / 640 = 3.875 mi² →  Qbkf=111 cfs | Wbkf=23.3 ft | Dbkf_mean=1.60 ft
+#   Bankfull stage (gauge) = 1.60 × 1.35 = 2.16 ft
+#   Rating A = 110.7 / 2.16^2.15 = 21.2
+UP_AREA_ACRES      = 2480    # Upper sub-basin drainage area (~40% of total) (ac)
+UP_DA_SQMI         = 3.875   # Drainage area in square miles (2480/640)
+UP_TC_HRS          = 1.2     # Shorter Tc — steeper gradient, smaller basin (hr)
+UP_CN_II           = 62      # Lower CN — denser canopy, less development
+UP_RATING_A        = 21.2    # Rating curve coefficient — Ecoregion 66 derived
+                              #   Qbkf(E66) = 110.7 cfs @ bankfull stage 2.16 ft
+UP_RATING_B        = 2.15    # Rating curve exponent (Manning's-derived, cobble channel)
+UP_BASEFLOW        = 3.5     # Low-season baseflow estimate at headwaters (cfs)
+UP_BANKFULL        = 2.16    # Bankfull stage at headwaters (ft) — Ecoregion 66 derived
+UP_BANKFULL_Q      = 110.7   # Bankfull discharge (cfs) — Ecoregion 66 composite curve
+UP_BANKFULL_MEAND  = 1.60    # Bankfull mean riffle depth (ft) — Ecoregion 66 regression
+UP_WIDTH_FT        = 23.3    # Bankfull channel width (ft) — Ecoregion 66 derived
+FLOOD_TRAVEL_MIN   = 65      # Flood wave travel time UPPER → NCCAT (min, pre-cal)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  2.5  ECOREGION 66 BLUE RIDGE REGIONAL CURVES
+#
+#  Source: Harman et al. (2000) "Bankfull Regional Curves for NC Mountain Streams"
+#          AWRA Conf. Water Resources in Extreme Environments, Anchorage AK.
+#          Composite extended by SCDNR Ecoregion 66 Blue Ridge Summary (May 2020),
+#          50 stable reference reaches across the Southern Blue Ridge province.
+#
+#  Power-law regression forms (DA in mi², outputs in cfs / ft / ft²):
+#    Qbkf = 35.0 × DA^0.850   bankfull discharge          R² ≈ 0.87
+#    Wbkf = 12.5 × DA^0.460   bankfull width              R² ≈ 0.88
+#    Dbkf = 1.05 × DA^0.310   bankfull mean riffle depth  R² ≈ 0.82
+#    Abkf = Wbkf × Dbkf       bankfull cross-section area
+#
+#  Depth-to-stage conversion:
+#    For B/C type cobble mountain streams, bankfull STAGE (gauge reading from
+#    thalweg datum) ≈ Dbkf_mean × 1.35.  This factor reflects the asymmetric
+#    cross-section shape of riffle pools where thalweg depth exceeds mean depth.
+#    Range in literature: 1.2–1.6 (Rosgen 1996; Harman et al. 2000).
+#
+#  Important caveats:
+#    • Individual reach scatter: ±40–60% around the composite line.
+#    • Post-Helene channel disturbance may shift reaches off the regional mean.
+#    • Carey et al. (2023) show that watershed slope/relief also significantly
+#      predict morphology in the Southern Blue Ridge beyond drainage area alone.
+#    • K-correction (Q_obs / Q_mod) from first 10–15 storm events replaces
+#      regional prior for each deployment point independently.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Regression coefficients — Ecoregion 66 Blue Ridge composite
+_E66_Q_COEF,  _E66_Q_EXP  = 35.0, 0.850   # bankfull discharge (cfs)
+_E66_W_COEF,  _E66_W_EXP  = 12.5, 0.460   # bankfull width (ft)
+_E66_D_COEF,  _E66_D_EXP  = 1.05, 0.310   # bankfull mean depth (ft)
+_E66_DEPTH_STAGE_RATIO     = 1.35           # mean depth → gauge stage (B/C cobble)
+
+
+def ecoregion66_bankfull(da_sqmi: float) -> dict:
+    """
+    Compute Ecoregion 66 Blue Ridge regional curve estimates for a given
+    drainage area.
+
+    Parameters
+    ----------
+    da_sqmi : float  — Drainage area in square miles.
+
+    Returns
+    -------
+    dict with keys:
+        qbkf         — bankfull discharge (cfs)
+        wbkf         — bankfull channel width (ft)
+        dbkf_mean    — bankfull mean riffle depth (ft)
+        abkf         — bankfull cross-sectional area (ft²)
+        dbkf_stage   — bankfull stage / gauge reading (ft), = dbkf_mean × 1.35
+        rating_a     — rating curve A coeff for given B exponent (uses Manning B=2.30)
+        da_sqmi      — echo of input for display
+    """
+    da = float(da_sqmi)
+    qbkf       = _E66_Q_COEF * da ** _E66_Q_EXP
+    wbkf       = _E66_W_COEF * da ** _E66_W_EXP
+    dbkf_mean  = _E66_D_COEF * da ** _E66_D_EXP
+    abkf       = wbkf * dbkf_mean
+    dbkf_stage = dbkf_mean * _E66_DEPTH_STAGE_RATIO
+    # Default A for B=2.30; callers may pass their own B
+    rating_a_230 = qbkf / (dbkf_stage ** 2.30)
+    return {
+        "qbkf":       round(qbkf,      1),
+        "wbkf":       round(wbkf,      1),
+        "dbkf_mean":  round(dbkf_mean, 2),
+        "abkf":       round(abkf,      1),
+        "dbkf_stage": round(dbkf_stage,2),
+        "rating_a":   round(rating_a_230, 1),
+        "da_sqmi":    round(da, 3),
+    }
+
+
+# Pre-compute regional curve estimates for both sub-basins (used in panel display)
+_E66_LO = ecoregion66_bankfull(LO_DA_SQMI)
+_E66_UP = ecoregion66_bankfull(UP_DA_SQMI)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -305,7 +414,7 @@ def fetch_usdm_drought():
     """
     try:
         end_dt   = date.today()
-        start_dt = date.today() - timedelta(days=21)  # last 3 weeks to ensure coverage
+        start_dt = date.today() - timedelta(days=21)
         r = requests.get(
             "https://usdmdataservices.unl.edu/api/CountyStatistics/"
             "GetDroughtSeverityStatisticsByAreaPercent",
@@ -321,12 +430,9 @@ def fetch_usdm_drought():
         if not r:
             return -1, "NO DATA", "---"
 
-        # Take most recent record (last entry)
-        rec = r[-1]
+        rec      = r[-1]
         map_date = rec.get("MapDate", "")[:10]
 
-        # NC DMAC rule: highest Dx covering ≥25% of county area
-        # USDM cumulative: D1 value = % area in D1 OR WORSE
         for level, key in [(5, "D4"), (4, "D3"), (3, "D2"), (2, "D1"), (1, "D0")]:
             if float(rec.get(key, 0) or 0) >= 25.0:
                 labels = {1: "D0 ABNORMALLY DRY", 2: "D1 MODERATE DROUGHT",
@@ -372,7 +478,6 @@ def calc_api_sat_pct(rain_5d):
 
 
 # USDM drought level → expert-implied soil saturation anchor (%)
-# Based on NDMC percentile thresholds (D0=20th pct, D1=10th, D2=5th, etc.)
 _USDM_IMPLIED_SAT = {1: 55.0, 2: 40.0, 3: 27.0, 4: 17.0, 5: 8.0}
 
 # USDM level → hard ceiling on final sat % (can't be wetter than drought implies)
@@ -399,7 +504,6 @@ def calc_soil_saturation_ensemble(sm_07, sm_728, sm_ok, rain_5d, usdm_level):
     """
     api_pct  = calc_api_sat_pct(rain_5d)
     era5_pct = calc_era5_sat_pct(sm_07, sm_728) if (sm_ok and sm_07 is not None) else None
-
     usdm_pct = _USDM_IMPLIED_SAT.get(usdm_level)
 
     if usdm_level <= 0:
@@ -411,15 +515,13 @@ def calc_soil_saturation_ensemble(sm_07, sm_728, sm_ok, rain_5d, usdm_level):
     else:
         w_era5, w_api, w_usdm = 0.10, 0.30, 0.60
 
-    # Redistribute ERA5 weight to API if unavailable
     if era5_pct is None:
         w_api   += w_era5
         w_era5   = 0.0
-        era5_use = api_pct   # placeholder for display
+        era5_use = api_pct
     else:
         era5_use = era5_pct
 
-    # Redistribute USDM weight to API if no USDM drought data
     if usdm_pct is None:
         w_api   += w_usdm
         w_usdm   = 0.0
@@ -429,12 +531,10 @@ def calc_soil_saturation_ensemble(sm_07, sm_728, sm_ok, rain_5d, usdm_level):
 
     sat_pct = (era5_use * w_era5) + (api_pct * w_api) + (usdm_use * w_usdm)
 
-    # Apply USDM hard ceiling
     ceiling = _USDM_CEILING.get(max(0, usdm_level), 100)
     sat_pct = min(sat_pct, ceiling)
     sat_pct = round(min(100.0, max(1.0, sat_pct)), 1)
 
-    # Stored water from ERA5 layers (or estimate from sat_pct if unavailable)
     if sm_ok and sm_07 is not None:
         sm_07c     = min(sm_07,  SOIL_POROSITY)
         sm_728c    = min(sm_728, SOIL_POROSITY)
@@ -456,9 +556,10 @@ def calc_soil_saturation_ensemble(sm_07, sm_728, sm_ok, rain_5d, usdm_level):
 
 
 def model_stream(soil_sat_pct, rain_24h, qpf_24h, rain_7d,
-                 area_acres, cn_ii, baseflow, rating_a, rating_b):
+                 area_acres, cn_ii, baseflow, rating_a, rating_b,
+                 bankfull_q):
     """
-    SCS-CN + Rational Method + Manning's rating curve.
+    SCS-CN + Rational Method + Ecoregion 66-anchored power-law rating curve.
 
     Steps:
       1. AMC adjustment: soil saturation % → CN (I=dry, II=normal, III=saturated)
@@ -467,8 +568,9 @@ def model_stream(soil_sat_pct, rain_24h, qpf_24h, rain_7d,
       4. Baseflow: rises 1× dry → 4× saturated (elevated water table)
       5. 7-day recession contribution from antecedent wet soils
       6. Rating curve: D = (Q / rating_a)^(1/rating_b)
+         Coefficients anchored to Ecoregion 66 Blue Ridge composite curves.
+         Q capped at 3× bankfull (above-bankfull flow on floodplain, Manning breaks down).
 
-    All parameters are desk estimates pending sensor calibration.
     Post-deployment: K = Q_obs/Q_mod corrects each point independently.
     """
     # 1. AMC-adjusted CN
@@ -483,7 +585,6 @@ def model_stream(soil_sat_pct, rain_24h, qpf_24h, rain_7d,
     P  = max(0.0, rain_24h + qpf_24h)
     S  = (1000 / cn_adj) - 10
     Ia = 0.2 * S
-    # Q_runoff_in kept for future use in volume calculations
     Q_runoff_in = ((P - Ia)**2 / (P - Ia + S)) if P > Ia else 0.0   # noqa
 
     # 3. Rational Method storm discharge
@@ -497,9 +598,10 @@ def model_stream(soil_sat_pct, rain_24h, qpf_24h, rain_7d,
     # 5. 7-day recession
     Q_recess = max(0.0, (rain_7d - rain_24h) * 0.8)
 
-    # 6. Total Q and rating curve depth
-    Q_total  = round(max(baseflow * 0.5, min(Q_base + Q_storm_cfs + Q_recess, 2800.0)), 1)
-    depth_ft = round(max(0.30, min((Q_total / rating_a) ** (1.0 / rating_b), 7.8)), 2)
+    # 6. Total Q — cap at 3× bankfull (rating curve not valid above bankfull + floodplain)
+    Q_max    = bankfull_q * 3.0
+    Q_total  = round(max(baseflow * 0.5, min(Q_base + Q_storm_cfs + Q_recess, Q_max)), 1)
+    depth_ft = round(max(0.20, min((Q_total / rating_a) ** (1.0 / rating_b), 9.0)), 2)
 
     return depth_ft, Q_total
 
@@ -521,21 +623,23 @@ def threat_meta(score):
     return               "EMERGENCY",  "#FF3333", "rgba(255,51,51,0.14)"
 
 
-def stage_status(depth_ft, bankfull_ft, lo_thresh=0.45, hi_thresh=0.70):
-    """Convert depth to status label and color relative to bankfull."""
+def stage_status(depth_ft, bankfull_ft):
+    """Convert depth to status label and color relative to Ecoregion 66 bankfull stage."""
     ratio = depth_ft / bankfull_ft
     if ratio < 0.45:  return "LOW FLOW",  "#00FF9C"
     if ratio < 0.65:  return "NORMAL",    "#00FF9C"
-    if ratio < 0.75:  return "ELEVATED",  "#FFFF00"
-    if ratio < 0.90:  return "WATCH",     "#FFD700"
+    if ratio < 0.80:  return "ELEVATED",  "#FFFF00"
+    if ratio < 0.95:  return "WATCH",     "#FFD700"
     return                   "FLOOD",     "#FF3333"
 
 
-def flow_status(q, lo, elev, high):
-    if q < lo:   return "LOW FLOW",  "#00FF9C"
-    if q < elev: return "NORMAL",    "#00FF9C"
-    if q < high: return "ELEVATED",  "#FFFF00"
-    return              "FLOOD",     "#FF3333"
+def flow_status(q, bankfull_q):
+    """Flow status relative to Ecoregion 66 bankfull discharge."""
+    if q < bankfull_q * 0.15:  return "LOW FLOW",  "#00FF9C"
+    if q < bankfull_q * 0.45:  return "NORMAL",    "#00FF9C"
+    if q < bankfull_q * 0.85:  return "ELEVATED",  "#FFFF00"
+    if q < bankfull_q * 1.00:  return "WATCH",     "#FFD700"
+    return                             "FLOOD",     "#FF3333"
 
 
 def nws_icon(txt):
@@ -662,13 +766,13 @@ t_lbl, t_clr, t_bg = threat_meta(threat)
 # ── LOWER watershed model (full outlet, NCCAT) ────────────────────────────────
 lo_depth, lo_flow = model_stream(
     soil_sat, rain_24h, qpf_24h, rain_7d,
-    LO_AREA_ACRES, LO_CN_II, LO_BASEFLOW, LO_RATING_A, LO_RATING_B
+    LO_AREA_ACRES, LO_CN_II, LO_BASEFLOW, LO_RATING_A, LO_RATING_B, LO_BANKFULL_Q
 )
 
 # ── UPPER watershed model (headwaters sub-basin) ─────────────────────────────
 up_depth, up_flow = model_stream(
     soil_sat, rain_24h, qpf_24h, rain_7d,
-    UP_AREA_ACRES, UP_CN_II, UP_BASEFLOW, UP_RATING_A, UP_RATING_B
+    UP_AREA_ACRES, UP_CN_II, UP_BASEFLOW, UP_RATING_A, UP_RATING_B, UP_BANKFULL_Q
 )
 
 # Smoothed display values (damp 30s refresh jumps)
@@ -682,11 +786,15 @@ st.session_state.lo_flow  = round(st.session_state.lo_flow  * 0.30 + lo_flow  * 
 st.session_state.up_depth = round(st.session_state.up_depth * 0.30 + up_depth * 0.70, 2)
 st.session_state.up_flow  = round(st.session_state.up_flow  * 0.30 + up_flow  * 0.70, 1)
 
-# Status labels
+# Status labels — thresholds now tied to Ecoregion 66 bankfull values
 lo_depth_lbl, lo_depth_clr = stage_status(st.session_state.lo_depth, LO_BANKFULL)
 up_depth_lbl, up_depth_clr = stage_status(st.session_state.up_depth, UP_BANKFULL)
-lo_flow_lbl,  lo_flow_clr  = flow_status(st.session_state.lo_flow,  40,  150, 800)
-up_flow_lbl,  up_flow_clr  = flow_status(st.session_state.up_flow,  20,   75, 450)
+lo_flow_lbl,  lo_flow_clr  = flow_status(st.session_state.lo_flow,  LO_BANKFULL_Q)
+up_flow_lbl,  up_flow_clr  = flow_status(st.session_state.up_flow,  UP_BANKFULL_Q)
+
+# Fraction of bankfull for gauge arc display
+lo_bkf_pct = round(min(100, st.session_state.lo_depth / LO_BANKFULL * 100), 1)
+up_bkf_pct = round(min(100, st.session_state.up_depth / UP_BANKFULL * 100), 1)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -701,7 +809,8 @@ st.markdown(f"""
     Cullowhee Creek Watershed &mdash; Jackson County, NC
     &nbsp;|&nbsp;
     {datetime.now().strftime("%A, %B %d %Y")} &mdash; {datetime.now().strftime("%H:%M:%S")}
-    &nbsp;|&nbsp; TWO-POINT WATERSHED MODEL (PRE-SENSOR)
+    &nbsp;|&nbsp; TWO-POINT WATERSHED MODEL (PRE-SENSOR) &nbsp;|&nbsp;
+    HYD. GEOMETRY: ECOREGION 66 BLUE RIDGE COMPOSITE
   </div>
 </div>""", unsafe_allow_html=True)
 
@@ -727,10 +836,13 @@ st.markdown(f"""
     SOIL SAT {soil_sat:.1f}%
     &nbsp;&middot;&nbsp; QPF(24h) {qpf_24h:.2f}&quot;
     &nbsp;&middot;&nbsp; PoP {pop_24h:.0f}%
+    &nbsp;&middot;&nbsp; LOWER {lo_bkf_pct:.0f}% of bankfull
+    &nbsp;&middot;&nbsp; UPPER {up_bkf_pct:.0f}% of bankfull
   </div>
   <div style="font-family:'Share Tech Mono',monospace; font-size:0.68em;
               color:#3A6A8A; margin-top:10px; letter-spacing:1px;">
     EVALUATED FACTORS: Soil Saturation &middot; 24hr Rainfall Forecast &middot; Probability of Precipitation
+    &nbsp;|&nbsp; BANKFULL REF: Ecoregion 66 Blue Ridge Composite (Harman et al. 2000 / SCDNR 2020)
   </div>
 </div>""", unsafe_allow_html=True)
 
@@ -747,10 +859,14 @@ st.markdown('</div>', unsafe_allow_html=True)
 
 
 # ── PANEL 3: UPPER WATERSHED — HEADWATERS ────────────────────────────────────
+# Gauge arc ranges now anchored to Ecoregion 66 bankfull stage (2.16 ft)
+_up_bkf  = UP_BANKFULL
+_up_max  = _up_bkf * 2.5
+
 st.markdown(
     f'<div class="upper-panel"><div class="upper-title">'
     f'UPPER CULLOWHEE CREEK &mdash; HEADWATERS SUB-BASIN '
-    f'({UP_AREA_ACRES:,} AC | CN={UP_CN_II} | Tc={UP_TC_HRS}h) '
+    f'({UP_AREA_ACRES:,} AC | {UP_DA_SQMI:.2f} mi² | CN={UP_CN_II} | Tc={UP_TC_HRS}h) '
     f'&nbsp;|&nbsp; FLOOD LEAD TIME TO NCCAT: ~{FLOOD_TRAVEL_MIN} MIN'
     f'</div>',
     unsafe_allow_html=True
@@ -759,47 +875,55 @@ u1, u2, u3 = st.columns([2, 2, 3])
 with u1:
     st.components.v1.html(make_stream_gauge(
         "g_up_depth", st.session_state.up_depth,
-        "STREAM DEPTH", 0.0, 6.0, " ft",
-        [{"range": [0.0, 2.5], "color": "rgba(0,255,156,0.15)"},
-         {"range": [2.5, 3.8], "color": "rgba(255,255,0,0.20)"},
-         {"range": [3.8, 6.0], "color": "rgba(255,51,51,0.25)"}],
+        "STREAM DEPTH", 0.0, _up_max, " ft",
+        [{"range": [0.0,          _up_bkf * 0.60], "color": "rgba(0,255,156,0.15)"},
+         {"range": [_up_bkf*0.60, _up_bkf * 0.95], "color": "rgba(255,215,0,0.20)"},
+         {"range": [_up_bkf*0.95, _up_max],         "color": "rgba(255,51,51,0.25)"}],
         up_depth_clr, up_depth_lbl, up_depth_clr,
-        f"Stage: {st.session_state.up_depth:.2f} ft  |  Bankfull: {UP_BANKFULL} ft",
-        "SCS-CN / RATIONAL METHOD"
-    ), height=230)
+        f"Stage: {st.session_state.up_depth:.2f} ft  |  Bankfull: {UP_BANKFULL} ft  |  {up_bkf_pct:.0f}% bkf",
+        "SCS-CN / RATIONAL METHOD / E66"
+    ), height=240)
 with u2:
+    _up_q_max = UP_BANKFULL_Q * 3.0
     st.components.v1.html(make_stream_gauge(
         "g_up_flow", st.session_state.up_flow,
-        "DISCHARGE", 0.0, 600.0, " cfs",
-        [{"range": [0.0,   75.0], "color": "rgba(0,255,156,0.15)"},
-         {"range": [75.0, 200.0], "color": "rgba(255,255,0,0.20)"},
-         {"range": [200.0,600.0], "color": "rgba(255,51,51,0.25)"}],
+        "DISCHARGE", 0.0, _up_q_max, " cfs",
+        [{"range": [0.0,             UP_BANKFULL_Q * 0.45], "color": "rgba(0,255,156,0.15)"},
+         {"range": [UP_BANKFULL_Q*0.45, UP_BANKFULL_Q * 0.95], "color": "rgba(255,215,0,0.20)"},
+         {"range": [UP_BANKFULL_Q*0.95, _up_q_max],              "color": "rgba(255,51,51,0.25)"}],
         up_flow_clr, up_flow_lbl, up_flow_clr,
-        f"Q: {st.session_state.up_flow:.1f} cfs  |  Q=18·D^2.15",
+        f"Q: {st.session_state.up_flow:.1f} cfs  |  Qbkf (E66): {UP_BANKFULL_Q:.0f} cfs",
         "RATIONAL METHOD"
-    ), height=230)
+    ), height=240)
 with u3:
     st.markdown('<div style="transform:scale(0.64); transform-origin:top left; width:156%;">', unsafe_allow_html=True)
-    st.markdown("**UPPER SUB-WATERSHED PARAMETERS**")
+    st.markdown("**UPPER SUB-WATERSHED PARAMETERS — ECOREGION 66 ANCHORED**")
     ua, ub = st.columns(2)
-    ua.metric("Drainage Area",    f"{UP_AREA_ACRES:,} ac",      "~40% of total")
-    ub.metric("SCS Curve No.",    f"CN {UP_CN_II}",              "Dense forest / AMC-II")
+    ua.metric("Drainage Area",    f"{UP_AREA_ACRES:,} ac ({UP_DA_SQMI:.2f} mi²)", "~40% of total")
+    ub.metric("Bankfull Q (E66)", f"{UP_BANKFULL_Q:.0f} cfs",                     "Harman 2000 / SCDNR 2020")
     uc, ud = st.columns(2)
-    uc.metric("Modeled Q",        f"{st.session_state.up_flow:.1f} cfs")
-    ud.metric("Modeled Depth",    f"{st.session_state.up_depth:.2f} ft")
+    uc.metric("Bankfull Stage",   f"{UP_BANKFULL:.2f} ft",                         "E66 Dbkf_mean × 1.35")
+    ud.metric("Width (E66)",      f"{UP_WIDTH_FT:.1f} ft",                          "Bankfull channel width")
     ue, uf = st.columns(2)
-    ue.metric("Flood Lead Time",  f"~{FLOOD_TRAVEL_MIN} min",   "to NCCAT outlet")
-    uf.metric("Time of Conc.",    f"{UP_TC_HRS} hr",             "Kirpich estimate")
-    st.caption("Pre-calibration | K = Q_obs/Q_mod corrects post-deployment | Sensor: upper Cullowhee Creek bridge")
+    ue.metric("Rating Curve A",   f"{UP_RATING_A:.1f}",                             f"B={UP_RATING_B} (Manning's)")
+    uf.metric("Flood Lead Time",  f"~{FLOOD_TRAVEL_MIN} min",                       "to NCCAT outlet")
+    st.caption(
+        f"E66 composite: Qbkf=35.0×DA^0.850 | Wbkf=12.5×DA^0.460 | Dbkf=1.05×DA^0.310\n"
+        f"Pre-calibration | K=Q_obs/Q_mod corrects after deployment | Reach scatter ±40-60%"
+    )
     st.markdown('</div>', unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 
 # ── PANEL 4: LOWER WATERSHED — NCCAT OUTLET ──────────────────────────────────
+# Gauge arc ranges anchored to Ecoregion 66 bankfull stage (2.87 ft)
+_lo_bkf  = LO_BANKFULL
+_lo_max  = _lo_bkf * 2.5
+
 st.markdown(
     f'<div class="lower-panel"><div class="lower-title">'
     f'LOWER CULLOWHEE CREEK &mdash; FULL WATERSHED OUTLET AT NCCAT '
-    f'({LO_AREA_ACRES:,} AC | CN={LO_CN_II} | Tc={LO_TC_HRS}h)'
+    f'({LO_AREA_ACRES:,} AC | {LO_DA_SQMI:.2f} mi² | CN={LO_CN_II} | Tc={LO_TC_HRS}h)'
     f'</div>',
     unsafe_allow_html=True
 )
@@ -807,25 +931,26 @@ l1, l2, l3 = st.columns([2, 2, 3])
 with l1:
     st.components.v1.html(make_stream_gauge(
         "g_lo_depth", st.session_state.lo_depth,
-        "STREAM DEPTH", 0.0, 8.0, " ft",
-        [{"range": [0.0, 4.0], "color": "rgba(0,255,156,0.15)"},
-         {"range": [4.0, 5.5], "color": "rgba(255,255,0,0.20)"},
-         {"range": [5.5, 8.0], "color": "rgba(255,51,51,0.25)"}],
+        "STREAM DEPTH", 0.0, _lo_max, " ft",
+        [{"range": [0.0,          _lo_bkf * 0.60], "color": "rgba(0,255,156,0.15)"},
+         {"range": [_lo_bkf*0.60, _lo_bkf * 0.95], "color": "rgba(255,215,0,0.20)"},
+         {"range": [_lo_bkf*0.95, _lo_max],         "color": "rgba(255,51,51,0.25)"}],
         lo_depth_clr, lo_depth_lbl, lo_depth_clr,
-        f"Stage: {st.session_state.lo_depth:.2f} ft  |  Bankfull: {LO_BANKFULL} ft",
-        "SCS-CN / RATIONAL METHOD"
-    ), height=230)
+        f"Stage: {st.session_state.lo_depth:.2f} ft  |  Bankfull: {LO_BANKFULL} ft  |  {lo_bkf_pct:.0f}% bkf",
+        "SCS-CN / RATIONAL METHOD / E66"
+    ), height=240)
 with l2:
+    _lo_q_max = LO_BANKFULL_Q * 3.0
     st.components.v1.html(make_stream_gauge(
         "g_lo_flow", st.session_state.lo_flow,
-        "DISCHARGE", 0.0, 1000.0, " cfs",
-        [{"range": [0.0,   150.0], "color": "rgba(0,255,156,0.15)"},
-         {"range": [150.0, 400.0], "color": "rgba(255,255,0,0.20)"},
-         {"range": [400.0,1000.0], "color": "rgba(255,51,51,0.25)"}],
+        "DISCHARGE", 0.0, _lo_q_max, " cfs",
+        [{"range": [0.0,             LO_BANKFULL_Q * 0.45], "color": "rgba(0,255,156,0.15)"},
+         {"range": [LO_BANKFULL_Q*0.45, LO_BANKFULL_Q * 0.95], "color": "rgba(255,215,0,0.20)"},
+         {"range": [LO_BANKFULL_Q*0.95, _lo_q_max],              "color": "rgba(255,51,51,0.25)"}],
         lo_flow_clr, lo_flow_lbl, lo_flow_clr,
-        f"Q: {st.session_state.lo_flow:.1f} cfs  |  Q=44·D^2.3",
+        f"Q: {st.session_state.lo_flow:.1f} cfs  |  Qbkf (E66): {LO_BANKFULL_Q:.0f} cfs",
         "RATIONAL METHOD"
-    ), height=230)
+    ), height=240)
 with l3:
     # Build source status strings
     _era5_str  = f"{sm_sources['era5_pct']:.0f}%" if sm_sources['era5_pct'] is not None else "UNAVAIL"
@@ -869,17 +994,78 @@ with l3:
   <div style="font-size:0.60em; color:#2A4A60; margin-top:1px;">
     ERA5 valid: {sm_ts_str}
   </div>
+  <div style="margin-top:10px; padding-top:7px; border-top:1px solid rgba(0,80,160,0.25);
+              font-size:0.62em; color:#1E5070; letter-spacing:1px; line-height:1.5;">
+    E66 BANKFULL: {LO_BANKFULL_Q:.0f} cfs &nbsp;|&nbsp; stage {LO_BANKFULL:.2f} ft
+    &nbsp;|&nbsp; W={LO_WIDTH_FT:.0f} ft &nbsp;|&nbsp; A={LO_RATING_A:.1f}·D^{LO_RATING_B}
+    <br>DA={LO_DA_SQMI:.2f} mi² &nbsp;|&nbsp; Harman 2000 / SCDNR E66 2020
+  </div>
 </div>
 """, unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 
+# ── PANEL 4B: ECOREGION 66 REGIONAL CURVE STATUS ─────────────────────────────
+with st.expander("▶  ECOREGION 66 BLUE RIDGE REGIONAL CURVE DERIVATION", expanded=False):
+    st.markdown(f"""
+<div style="background:rgba(0,10,25,0.95); border:1px solid rgba(0,100,200,0.30);
+            border-radius:9px; padding:18px 20px; font-family:'Share Tech Mono',monospace;">
+  <div style="color:#0099FF; font-size:0.80em; letter-spacing:3px; margin-bottom:14px;
+              border-bottom:1px solid rgba(0,100,200,0.25); padding-bottom:8px;">
+    ECOREGION 66 (SOUTHERN BLUE RIDGE) COMPOSITE CURVES — DERIVATION AUDIT
+  </div>
+  <div style="font-size:0.70em; color:#3A7090; margin-bottom:12px; line-height:1.7;">
+    Source: Harman et al. (2000) NC Mountain Streams + SCDNR Ecoregion 66 Blue Ridge Summary (May 2020)<br>
+    50 stable reference reaches across Southern Blue Ridge physiographic province<br>
+    Regression forms:
+    &nbsp; Q<sub>bkf</sub> = 35.0 × DA<sup>0.850</sup> (cfs, R²≈0.87)
+    &nbsp; W<sub>bkf</sub> = 12.5 × DA<sup>0.460</sup> (ft, R²≈0.88)
+    &nbsp; D<sub>bkf</sub> = 1.05 × DA<sup>0.310</sup> (ft, mean riffle depth, R²≈0.82)<br>
+    Bankfull stage = D<sub>bkf,mean</sub> × 1.35 (B/C cobble mountain stream depth ratio)
+  </div>
+  <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px;">
+    <div style="background:rgba(0,180,100,0.06); border:1px solid rgba(0,180,100,0.20);
+                border-radius:7px; padding:12px;">
+      <div style="color:#00CC77; font-size:0.72em; letter-spacing:2px; margin-bottom:8px;">UPPER — {UP_DA_SQMI:.3f} mi²</div>
+      <div style="font-size:0.67em; color:#7AACCC; line-height:1.9;">
+        Q<sub>bkf</sub> = 35.0 × {UP_DA_SQMI}^0.850 = <span style="color:#FFFFFF;">{_E66_UP['qbkf']:.1f} cfs</span><br>
+        W<sub>bkf</sub> = 12.5 × {UP_DA_SQMI}^0.460 = <span style="color:#FFFFFF;">{_E66_UP['wbkf']:.1f} ft</span><br>
+        D<sub>bkf,mean</sub> = 1.05 × {UP_DA_SQMI}^0.310 = <span style="color:#FFFFFF;">{_E66_UP['dbkf_mean']:.2f} ft</span><br>
+        A<sub>bkf</sub> = {_E66_UP['wbkf']:.1f} × {_E66_UP['dbkf_mean']:.2f} = <span style="color:#FFFFFF;">{_E66_UP['abkf']:.1f} ft²</span><br>
+        Stage<sub>bkf</sub> = {_E66_UP['dbkf_mean']:.2f} × 1.35 = <span style="color:#FFD700;">{_E66_UP['dbkf_stage']:.2f} ft</span><br>
+        Rating A = {_E66_UP['qbkf']:.1f} / {_E66_UP['dbkf_stage']:.2f}^{UP_RATING_B} = <span style="color:#FFD700;">{UP_RATING_A:.1f}</span>
+      </div>
+    </div>
+    <div style="background:rgba(0,100,200,0.06); border:1px solid rgba(0,119,255,0.20);
+                border-radius:7px; padding:12px;">
+      <div style="color:#0099FF; font-size:0.72em; letter-spacing:2px; margin-bottom:8px;">LOWER — {LO_DA_SQMI:.3f} mi²</div>
+      <div style="font-size:0.67em; color:#7AACCC; line-height:1.9;">
+        Q<sub>bkf</sub> = 35.0 × {LO_DA_SQMI}^0.850 = <span style="color:#FFFFFF;">{_E66_LO['qbkf']:.1f} cfs</span><br>
+        W<sub>bkf</sub> = 12.5 × {LO_DA_SQMI}^0.460 = <span style="color:#FFFFFF;">{_E66_LO['wbkf']:.1f} ft</span><br>
+        D<sub>bkf,mean</sub> = 1.05 × {LO_DA_SQMI}^0.310 = <span style="color:#FFFFFF;">{_E66_LO['dbkf_mean']:.2f} ft</span><br>
+        A<sub>bkf</sub> = {_E66_LO['wbkf']:.1f} × {_E66_LO['dbkf_mean']:.2f} = <span style="color:#FFFFFF;">{_E66_LO['abkf']:.1f} ft²</span><br>
+        Stage<sub>bkf</sub> = {_E66_LO['dbkf_mean']:.2f} × 1.35 = <span style="color:#FFD700;">{_E66_LO['dbkf_stage']:.2f} ft</span><br>
+        Rating A = {_E66_LO['qbkf']:.1f} / {_E66_LO['dbkf_stage']:.2f}^{LO_RATING_B} = <span style="color:#FFD700;">{LO_RATING_A:.1f}</span>
+      </div>
+    </div>
+  </div>
+  <div style="margin-top:12px; padding-top:8px; border-top:1px solid rgba(0,80,160,0.25);
+              font-size:0.62em; color:#2A5070; line-height:1.6; letter-spacing:0.5px;">
+    ⚠ CAVEATS: Individual reach scatter ±40–60% around composite line. Post-Helene channel disturbance
+    may shift Cullowhee Creek off regional mean. Carey et al. (2023) demonstrate that watershed slope
+    and relief are significant additional predictors of channel morphology in the Southern Blue Ridge
+    beyond drainage area alone (Int. J. River Basin Mgmt). K-correction from first 10–15 storm events
+    will supersede these regional priors for each sensor point independently.
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+
 # ── PANEL 5: WATERSHED COMPARISON ────────────────────────────────────────────
 st.markdown('<div class="panel"><div class="panel-title">WATERSHED COMPARISON &mdash; UPPER vs LOWER SUB-BASIN | CULLOWHEE CREEK</div>', unsafe_allow_html=True)
 
-# Compute delta values
-dq  = round(st.session_state.lo_flow  - st.session_state.up_flow,  1)
-dd  = round(st.session_state.lo_depth - st.session_state.up_depth, 2)
+dq     = round(st.session_state.lo_flow  - st.session_state.up_flow,  1)
+dd     = round(st.session_state.lo_depth - st.session_state.up_depth, 2)
 dq_pct = round((dq / st.session_state.up_flow * 100) if st.session_state.up_flow > 0 else 0, 1)
 
 comp_clr_up = up_depth_clr
@@ -897,7 +1083,12 @@ st.markdown(f"""
     <div style="font-size:1.1em; color:{up_flow_clr};">{st.session_state.up_flow:.1f} cfs</div>
     <div style="font-family:'Share Tech Mono',monospace; font-size:0.72em; color:{comp_clr_up};
                 margin-top:6px; letter-spacing:2px;">{up_depth_lbl}</div>
-    <div style="font-size:0.72em; color:#445566; margin-top:4px;">Bankfull: {UP_BANKFULL} ft</div>
+    <div style="font-size:0.72em; color:#445566; margin-top:4px;">
+      Bankfull: {UP_BANKFULL} ft &nbsp;|&nbsp; Q<sub>bkf</sub>: {UP_BANKFULL_Q:.0f} cfs
+    </div>
+    <div style="font-size:0.68em; color:#1A4A60; margin-top:2px;">
+      {up_bkf_pct:.0f}% of bankfull &nbsp;|&nbsp; W={UP_WIDTH_FT:.0f} ft
+    </div>
   </div>
 
   <div style="background:rgba(0,100,200,0.07); border:1px solid rgba(0,119,255,0.20);
@@ -925,13 +1116,18 @@ st.markdown(f"""
     <div style="font-size:1.1em; color:{lo_flow_clr};">{st.session_state.lo_flow:.1f} cfs</div>
     <div style="font-family:'Share Tech Mono',monospace; font-size:0.72em; color:{comp_clr_lo};
                 margin-top:6px; letter-spacing:2px;">{lo_depth_lbl}</div>
-    <div style="font-size:0.72em; color:#445566; margin-top:4px;">Bankfull: {LO_BANKFULL} ft</div>
+    <div style="font-size:0.72em; color:#445566; margin-top:4px;">
+      Bankfull: {LO_BANKFULL} ft &nbsp;|&nbsp; Q<sub>bkf</sub>: {LO_BANKFULL_Q:.0f} cfs
+    </div>
+    <div style="font-size:0.68em; color:#1A4A60; margin-top:2px;">
+      {lo_bkf_pct:.0f}% of bankfull &nbsp;|&nbsp; W={LO_WIDTH_FT:.0f} ft
+    </div>
   </div>
 
 </div>
 <div style="font-family:'Share Tech Mono',monospace; font-size:0.68em; color:#2A5070;
             text-align:center; margin-top:6px; letter-spacing:1px;">
-  MODEL: SCS-CN + RATIONAL METHOD + MANNING'S RATING CURVE &middot;
+  MODEL: SCS-CN + RATIONAL METHOD + ECOREGION 66 RATING CURVE &middot;
   SOIL: ERA5-LAND + HRRR API + USDM ENSEMBLE &middot;
   CALIBRATION: K = Q<sub>obs</sub>/Q<sub>mod</sub> POST-SENSOR DEPLOYMENT
 </div>
