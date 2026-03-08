@@ -380,24 +380,33 @@ def nws_icon(txt):
 # ─────────────────────────────────────────────
 
 def make_dial(v, t, min_v, max_v, u, c, sub="", src=""):
+    # Build title text with clean, readable hierarchy
+    title_parts = [f"<b>{t}</b>"]
+    if sub:
+        title_parts.append(f"<span style='font-size:11px;color:#7AACCC'>{sub}</span>")
+    if src:
+        title_parts.append(f"<span style='font-size:9px;color:#2A6080'>{src}</span>")
+    title_text = "<br>".join(title_parts)
+
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
         value=v,
-        number={"suffix": u, "font": {"size": 22, "color": "white"}, "valueformat": ".2f"},
+        number={"suffix": u, "font": {"size": 24, "color": "white"}, "valueformat": ".2f"},
         title={
-            "text": (f"{t}"
-                     f"<br><span style='font-size:0.78em;color:#7AACCC'>{sub}</span>"
-                     f"<br><span style='font-size:0.65em;color:#1A5070'>{src}</span>"),
-            "font": {"size": 11, "color": "#7AACCC"},
+            "text": title_text,
+            "font": {"size": 13, "color": "#A0C8E0"},
         },
         gauge={
-            "axis":    {"range": [min_v, max_v]},
+            "axis":    {"range": [min_v, max_v], "tickfont": {"size": 9, "color": "#334455"}},
             "bar":     {"color": c, "thickness": 0.25},
             "bgcolor": "rgba(0,0,0,0)",
         },
     ))
-    fig.update_layout(paper_bgcolor="rgba(0,0,0,0)",
-                      margin=dict(t=65, b=25, l=30, r=30), height=170)
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        margin=dict(t=70, b=20, l=25, r=25),
+        height=185,
+    )
     return fig
 
 
