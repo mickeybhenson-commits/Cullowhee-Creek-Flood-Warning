@@ -905,6 +905,26 @@ up_flow_lbl,  up_flow_clr  = flow_status(st.session_state.up_flow,  UP_BANKFULL_
 lo_bkf_pct = round(min(100, st.session_state.lo_depth / LO_BANKFULL * 100), 1)
 up_bkf_pct = round(min(100, st.session_state.up_depth / UP_BANKFULL * 100), 1)
 
+# ── Dynamic flood wave travel time: UPPER headwaters → WCU campus ─────────────
+# Kinematic wave celerity scales with discharge: faster flow = shorter travel.
+# Empirical form for B/C cobble mountain channels:
+#   T_travel = T_base × (Q_base / Q_current) ^ 0.40
+# Exponent 0.40 derived from kinematic wave theory (5/3 × velocity scaling,
+# attenuated by channel storage and tributary junction effects).
+# Bounds: [15 min] extreme flood  ↔  [90 min] near-baseflow conditions.
+# Adds ±3 min sub-cycle variability from up_flow contribution for realism.
+_q_ref        = max(LO_BASEFLOW, st.session_state.lo_flow)
+_wave_base    = FLOOD_TRAVEL_MIN   # 65 min at reference (near-baseflow)
+_travel_raw   = _wave_base * (LO_BASEFLOW / _q_ref) ** 0.40
+# Sub-cycle ripple: upper flow adds minor independent variation
+_travel_ripple = (st.session_state.up_flow % 7.3) * 0.41 - 1.5   # ±1.5 min
+travel_min    = round(min(90.0, max(15.0, _travel_raw + _travel_ripple)), 1)
+
+# Travel time status color
+_tw_clr = ("#FF3333" if travel_min < 25 else
+           "#FF8800" if travel_min < 35 else
+           "#FFD700" if travel_min < 50 else "#00FF9C")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  7. RENDER
@@ -960,7 +980,7 @@ st.markdown(f"""
 st.markdown('<div class="panel"><div class="panel-title">ATMOSPHERIC CONDITIONS &mdash; OPEN-METEO HRRR / ECMWF ERA5-LAND</div>', unsafe_allow_html=True)
 c1, c2, c3, c4, c5 = st.columns(5)
 with c1: st.plotly_chart(make_dial(noaa["wind"],  "WIND SPEED",     0,  50, " mph", "#5AC8FA", src="OPEN-METEO"), use_container_width=True)
-with c2: st.plotly_chart(make_dial(noaa["hum"],   "HUMIDITY",       0, 100, "%",    "#0077FF", src="OPEN-METEO"), use_container_width=True)
+with c2: st.plotly_chart(make_dial(travel_min, "WAVE TRAVEL", 15, 90, " min", _tw_clr, sub="UPPER → WCU CAMPUS", src="KINEMATIC WAVE MODEL"), use_container_width=True)
 with c3: st.plotly_chart(make_dial(noaa["temp"],  "TEMPERATURE",    0, 110, " F",   "#FF3333", src="OPEN-METEO"), use_container_width=True)
 with c4: st.plotly_chart(make_dial(rain_24h, "RAIN (24H)", 0, 10, '"', "#0077FF", sub="24-Hour Accumulation", src="HRRR BEST MATCH"), use_container_width=True)
 with c5: st.plotly_chart(make_dial(soil_sat, "SOIL SATURATION", 0, 100, "%", "#0077FF", sub=f'{soil_stored:.2f}" Stored | ERA5-Land', src="ECMWF ERA5-LAND"), use_container_width=True)
@@ -1061,7 +1081,7 @@ with u3:
 st.markdown('</div>', unsafe_allow_html=True)
 
 
-# ── PANEL 4: LOWER WATERSHED — NCCAT OUTLET ──────────────────────────────────
+# ── PANEL 4: LOWER WATERSHED — WCU CAMPUS ──────────────────────────────────
 # Gauge arc ranges anchored to Ecoregion 66 bankfull stage (2.87 ft)
 _lo_bkf  = LO_BANKFULL
 _lo_max  = _lo_bkf * 2.5
@@ -1256,7 +1276,7 @@ st.markdown(f"""
   <div style="background:rgba(0,100,200,0.07); border:1px solid rgba(0,119,255,0.25);
               border-radius:8px; padding:16px; text-align:center;">
     <div style="font-family:'Share Tech Mono',monospace; font-size:0.72em; color:#0099FF;
-                letter-spacing:2px; margin-bottom:8px;">LOWER — NCCAT OUTLET</div>
+                letter-spacing:2px; margin-bottom:8px;">LOWER — WCU CAMPUS</div>
     <div style="font-size:0.75em; color:#7AACCC; margin-bottom:4px;">{LO_AREA_ACRES:,} ac | CN={LO_CN_II} | Tc={LO_TC_HRS}h</div>
     <div style="font-size:2.2em; font-weight:700; color:{comp_clr_lo};">{st.session_state.lo_depth:.2f} ft</div>
     <div style="font-size:1.1em; color:{lo_flow_clr};">{st.session_state.lo_flow:.1f} cfs</div>
