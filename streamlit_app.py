@@ -462,13 +462,82 @@ st.markdown('</div>', unsafe_allow_html=True)
 
 
 # ROW 5: LIVE RADAR — NWS KGSP NEXRAD WSR-88D
-st.markdown('<div class="panel"><div class="panel-title">NEXRAD WSR-88D LIVE RADAR &mdash; KGSP GREENVILLE-SPARTANBURG (NWS OPERATIONAL)</div>', unsafe_allow_html=True)
-try:
-    st.components.v1.html(
-        '<iframe src="https://radar.weather.gov/station/KGSP/standard" '
-        'width="100%" height="580" style="border-radius:10px; border:none; background:#04090F;"></iframe>',
-        height=590,
-    )
-except Exception:
-    st.error("NWS radar unavailable — visit radar.weather.gov/station/KGSP directly.")
+st.markdown('<div class="panel"><div class="panel-title">NEXRAD WSR-88D RADAR &mdash; KGSP GREENVILLE-SPARTANBURG</div>', unsafe_allow_html=True)
+
+import time as _time
+_cache_bust = int(_time.time() / 120)  # refresh every 2 min
+
+radar_html = f"""
+<div style="
+    background: #04090F;
+    border-radius: 10px;
+    border: 1px solid #1a2a3a;
+    overflow: hidden;
+    font-family: 'Courier New', monospace;
+">
+  <!-- Header bar -->
+  <div style="
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 16px;
+      background: #0a1520;
+      border-bottom: 1px solid #1a3a5a;
+  ">
+    <div style="display:flex; align-items:center; gap:10px;">
+      <div style="width:8px; height:8px; border-radius:50%; background:#00FF9C; box-shadow:0 0 6px #00FF9C;"></div>
+      <span style="color:#00CFFF; font-size:11px; font-weight:700; letter-spacing:2px;">LIVE</span>
+      <span style="color:#8899AA; font-size:11px; letter-spacing:1px;">| WSR-88D BASE REFLECTIVITY | KGSP | NWS GREENVILLE-SPARTANBURG</span>
+    </div>
+    <div style="color:#556677; font-size:10px; letter-spacing:1px;">AUTO-LOOP &#x21BB; 2 MIN</div>
+  </div>
+
+  <!-- Radar image -->
+  <div style="position:relative; background:#000; text-align:center;">
+    <img src="https://radar.weather.gov/ridge/standard/KGSP_loop.gif?v={_cache_bust}"
+         style="width:100%; max-height:520px; object-fit:contain; display:block;"
+         alt="KGSP NEXRAD Loop" />
+
+    <!-- Bottom legend bar -->
+    <div style="
+        position:absolute; bottom:0; left:0; right:0;
+        background: linear-gradient(transparent, rgba(0,0,0,0.85));
+        padding: 20px 16px 8px;
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-end;
+    ">
+      <div style="color:#667788; font-size:10px; letter-spacing:1px;">
+        COVERAGE AREA: WNC &bull; SC UPSTATE &bull; NW GA &bull; SW VA
+      </div>
+      <div style="display:flex; gap:4px; align-items:center;">
+        <span style="color:#556677; font-size:9px; margin-right:4px;">dBZ</span>
+        <span style="display:inline-block; width:18px; height:10px; background:#04e9e7;"></span>
+        <span style="display:inline-block; width:18px; height:10px; background:#009d00;"></span>
+        <span style="display:inline-block; width:18px; height:10px; background:#00d400;"></span>
+        <span style="display:inline-block; width:18px; height:10px; background:#f5f500;"></span>
+        <span style="display:inline-block; width:18px; height:10px; background:#e69800;"></span>
+        <span style="display:inline-block; width:18px; height:10px; background:#e60000;"></span>
+        <span style="display:inline-block; width:18px; height:10px; background:#990000;"></span>
+        <span style="display:inline-block; width:18px; height:10px; background:#ff00ff;"></span>
+        <span style="color:#556677; font-size:9px; margin-left:4px;">LIGHT &rarr; EXTREME</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div style="
+      padding: 6px 16px;
+      background: #0a1520;
+      border-top: 1px solid #1a3a5a;
+      display: flex;
+      justify-content: space-between;
+  ">
+    <span style="color:#445566; font-size:10px; letter-spacing:1px;">SRC: radar.weather.gov &bull; NWS OPERATIONAL DATA</span>
+    <span style="color:#445566; font-size:10px; letter-spacing:1px;">JACKSON CO. WATERSHED MONITORING SYSTEM</span>
+  </div>
+</div>
+"""
+
+st.components.v1.html(radar_html, height=610)
 st.markdown('</div>', unsafe_allow_html=True)
