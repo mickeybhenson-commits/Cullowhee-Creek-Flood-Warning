@@ -4,11 +4,14 @@ Western Carolina University — NEMO River Energy Initiative
 Jackson County, NC — Watershed Monitoring System
 
 Architecture: Two-point sub-watershed model (pre-sensor)
-  UPPER: Headwaters sub-basin (~2,480 ac | CN=62 | Tc=1.2h)
-  LOWER: Full watershed outlet at NCCAT (~6,200 ac | CN=68 | Tc=2.5h)
+  UPPER: Headwaters sub-basin (~2,480 ac | 3.875 mi² | CN=62 | Tc=1.2h)
+  LOWER: Full watershed outlet at NCCAT (~6,200 ac | 9.688 mi² | CN=68 | Tc=2.5h)
 
-Flood wave travel time UPPER → LOWER: ~65 min (pre-calibration estimate)
-Post-deployment: K = Q_observed / Q_modeled calibrates both points independently.
+Hydrologic engine: SCS TR-55 Type II peak flow (NRCS 1986)
+  Replaces Rational Method (valid only ≤640 ac; discarded Tc entirely).
+  TR-55 is the NRCS/NWS standard for 1–20 mi² humid Appalachian watersheds.
+  Tc is now used correctly: upper (1.2h) vs lower (2.5h) gives physically
+  distinct storm responses, especially for fast convective events vs slow frontal.
 
 Hydraulic geometry baseline — ECOREGION 66 BLUE RIDGE COMPOSITE CURVES:
   Source: Harman et al. (2000) NC Mountain Streams + SCDNR Ecoregion 66 (May 2020)
@@ -34,6 +37,7 @@ Data sources:
 Version: 2026-03  |  Status: Pre-sensor (modeled)  |  Next: NCCAT Blues Notecard deployment
 """
 
+import math
 import streamlit as st
 import requests
 import json
@@ -555,52 +559,115 @@ def calc_soil_saturation_ensemble(sm_07, sm_728, sm_ok, rain_5d, usdm_level):
     return sat_pct, stored_in, color, sources
 
 
-def model_stream(soil_sat_pct, rain_24h, qpf_24h, rain_7d,
-                 area_acres, cn_ii, baseflow, rating_a, rating_b,
-                 bankfull_q):
+
+# ── SCS TR-55 Type II storm — unit peak discharge coefficients (Exhibit 4-I) ──
+# qu = 10^(C0 + C1·log10(Tc) + C2·log10(Tc)²)  units: csm/in (cfs/mi²/in)
+# Tabulated by initial abstraction ratio Ia/P.  Tc must be in hours (0.1–10 h).
+# Source: USDA NRCS TR-55 (1986), Table 4-1.  Type II storm distribution
+#         is standard for humid East US including WNC / Southern Appalachians.
+_TR55_IAPRATIO = [0.10, 0.20, 0.30, 0.35, 0.40, 0.45, 0.50]
+_TR55_C0       = [2.55323, 2.23537, 2.10304, 2.18219, 2.17339, 2.16251, 2.14583]
+_TR55_C1       = [-0.61512, -0.50537, -0.51488, -0.50258, -0.48985, -0.47856, -0.46772]
+_TR55_C2       = [-0.16403, -0.11657, -0.08648, -0.09057, -0.09084, -0.09303, -0.09373]
+
+
+def _tr55_unit_peak(tc_hrs: float, ia_p: float) -> float:
     """
-    SCS-CN + Rational Method + Ecoregion 66-anchored power-law rating curve.
+    Interpolate TR-55 unit peak discharge qu (cfs/mi²/in).
 
-    Steps:
-      1. AMC adjustment: soil saturation % → CN (I=dry, II=normal, III=saturated)
-      2. SCS runoff depth from combined observed + forecast 24h rainfall
-      3. Rational Method: Q_storm = C·i·A / 1.008
-      4. Baseflow: rises 1× dry → 4× saturated (elevated water table)
-      5. 7-day recession contribution from antecedent wet soils
-      6. Rating curve: D = (Q / rating_a)^(1/rating_b)
-         Coefficients anchored to Ecoregion 66 Blue Ridge composite curves.
-         Q capped at 3× bankfull (above-bankfull flow on floodplain, Manning breaks down).
+    Parameters
+    ----------
+    tc_hrs : Time of concentration (hours).  Clamped to [0.1, 10.0].
+    ia_p   : Initial abstraction ratio Ia/P.  Clamped to [0.10, 0.50].
+    """
+    ia_p   = max(0.10, min(0.50, float(ia_p)))
+    tc_hrs = max(0.10, min(10.0, float(tc_hrs)))
+    lt     = math.log10(tc_hrs)
 
-    Post-deployment: K = Q_obs/Q_mod corrects each point independently.
+    # Find bounding rows and interpolate coefficients
+    tbl = _TR55_IAPRATIO
+    if ia_p <= tbl[0]:
+        C0, C1, C2 = _TR55_C0[0], _TR55_C1[0], _TR55_C2[0]
+    elif ia_p >= tbl[-1]:
+        C0, C1, C2 = _TR55_C0[-1], _TR55_C1[-1], _TR55_C2[-1]
+    else:
+        for i in range(len(tbl) - 1):
+            if tbl[i] <= ia_p <= tbl[i + 1]:
+                t = (ia_p - tbl[i]) / (tbl[i + 1] - tbl[i])
+                C0 = _TR55_C0[i] + t * (_TR55_C0[i + 1] - _TR55_C0[i])
+                C1 = _TR55_C1[i] + t * (_TR55_C1[i + 1] - _TR55_C1[i])
+                C2 = _TR55_C2[i] + t * (_TR55_C2[i + 1] - _TR55_C2[i])
+                break
+    return 10.0 ** (C0 + C1 * lt + C2 * lt ** 2)
+
+
+def model_stream(soil_sat_pct, rain_24h, qpf_24h, rain_7d,
+                 da_sqmi, tc_hrs, cn_ii, baseflow,
+                 rating_a, rating_b, bankfull_q):
+    """
+    SCS TR-55 peak flow + Ecoregion 66-anchored power-law rating curve.
+
+    Replaces Rational Method, which is only valid up to ~200-640 acres.
+    TR-55 is the NRCS standard for 1–20 mi² humid Appalachian catchments
+    and is what NWS / FEMA use in WNC flood studies at this scale.
+
+    Steps
+    -----
+    1. AMC-adjusted CN from soil saturation %
+         Dry (<30%):     CN_I  = CN_II × 0.87
+         Normal (30-65%): CN_II (no change)
+         Wet  (>65%):    CN_III via standard SCS formula
+    2. SCS-CN runoff depth (inches) from 24h observed + QPF
+         Q_in = (P − Ia)² / (P − Ia + S),  Ia = 0.2·S
+    3. TR-55 Type II unit peak discharge interpolation
+         qu = 10^(C0 + C1·log10(Tc) + C2·log10(Tc)²)   [cfs/mi²/in]
+         qp = qu × da_sqmi × Q_runoff_in                [cfs]
+         This correctly uses Tc (which Rational Method discarded entirely).
+    4. Antecedent baseflow: scales 1× (dry) → 4× (saturated)
+    5. 7-day recession: dimensionally correct — scaled by baseflow level
+         Q_recess = max(0, (rain_7d − rain_24h) × baseflow × 0.25)
+         (previously was raw rainfall × 0.8 — dimensionally wrong)
+    6. Total Q capped at 3× bankfull (floodplain flow; Manning invalid above)
+    7. Rating curve: D = (Q / rating_a)^(1/rating_b)
+
+    Post-sensor calibration: K = Q_obs / Q_mod applied after 10–15 storm events.
     """
     # 1. AMC-adjusted CN
     if soil_sat_pct < 30:
-        cn_adj = max(50, cn_ii * 0.87)
+        cn_adj = max(50.0, cn_ii * 0.87)
     elif soil_sat_pct < 65:
-        cn_adj = cn_ii
+        cn_adj = float(cn_ii)
     else:
-        cn_adj = min(95, (23 * cn_ii) / (10 + 0.13 * cn_ii))
+        cn_adj = min(95.0, (23.0 * cn_ii) / (10.0 + 0.13 * cn_ii))
 
-    # 2. SCS runoff depth
+    # 2. SCS runoff depth (inches)
     P  = max(0.0, rain_24h + qpf_24h)
-    S  = (1000 / cn_adj) - 10
+    S  = (1000.0 / cn_adj) - 10.0
     Ia = 0.2 * S
-    Q_runoff_in = ((P - Ia)**2 / (P - Ia + S)) if P > Ia else 0.0   # noqa
+    if P > Ia:
+        Q_runoff_in = (P - Ia) ** 2 / (P - Ia + S)
+    else:
+        Q_runoff_in = 0.0
 
-    # 3. Rational Method storm discharge
-    C           = max(0.0, min(0.95, (cn_adj - 25) / 75))
-    i_inhr      = P / 24.0
-    Q_storm_cfs = (C * i_inhr * area_acres) / 1.008
+    # 3. TR-55 peak storm discharge
+    if Q_runoff_in > 0.0 and P > 0.0:
+        ia_p      = min(0.50, max(0.10, Ia / P))
+        qu        = _tr55_unit_peak(tc_hrs, ia_p)         # cfs/mi²/in
+        Q_storm   = qu * da_sqmi * Q_runoff_in            # cfs — dimensionally correct
+    else:
+        Q_storm = 0.0
 
     # 4. Antecedent baseflow (moisture-scaled)
-    Q_base = baseflow * (1.0 + (soil_sat_pct / 100) * 3.0)
+    Q_base = baseflow * (1.0 + (soil_sat_pct / 100.0) * 3.0)
 
-    # 5. 7-day recession
-    Q_recess = max(0.0, (rain_7d - rain_24h) * 0.8)
+    # 5. 7-day recession (dimensionally correct — scaled by baseflow)
+    Q_recess = max(0.0, (rain_7d - rain_24h) * baseflow * 0.25)
 
-    # 6. Total Q — cap at 3× bankfull (rating curve not valid above bankfull + floodplain)
-    Q_max    = bankfull_q * 3.0
-    Q_total  = round(max(baseflow * 0.5, min(Q_base + Q_storm_cfs + Q_recess, Q_max)), 1)
+    # 6. Total Q — cap at 3× bankfull
+    Q_max   = bankfull_q * 3.0
+    Q_total = round(max(baseflow * 0.5, min(Q_base + Q_storm + Q_recess, Q_max)), 1)
+
+    # 7. Rating curve
     depth_ft = round(max(0.20, min((Q_total / rating_a) ** (1.0 / rating_b), 9.0)), 2)
 
     return depth_ft, Q_total
@@ -766,13 +833,13 @@ t_lbl, t_clr, t_bg = threat_meta(threat)
 # ── LOWER watershed model (full outlet, NCCAT) ────────────────────────────────
 lo_depth, lo_flow = model_stream(
     soil_sat, rain_24h, qpf_24h, rain_7d,
-    LO_AREA_ACRES, LO_CN_II, LO_BASEFLOW, LO_RATING_A, LO_RATING_B, LO_BANKFULL_Q
+    LO_DA_SQMI, LO_TC_HRS, LO_CN_II, LO_BASEFLOW, LO_RATING_A, LO_RATING_B, LO_BANKFULL_Q
 )
 
 # ── UPPER watershed model (headwaters sub-basin) ─────────────────────────────
 up_depth, up_flow = model_stream(
     soil_sat, rain_24h, qpf_24h, rain_7d,
-    UP_AREA_ACRES, UP_CN_II, UP_BASEFLOW, UP_RATING_A, UP_RATING_B, UP_BANKFULL_Q
+    UP_DA_SQMI, UP_TC_HRS, UP_CN_II, UP_BASEFLOW, UP_RATING_A, UP_RATING_B, UP_BANKFULL_Q
 )
 
 # Smoothed display values (damp 30s refresh jumps)
@@ -1127,7 +1194,7 @@ st.markdown(f"""
 </div>
 <div style="font-family:'Share Tech Mono',monospace; font-size:0.68em; color:#2A5070;
             text-align:center; margin-top:6px; letter-spacing:1px;">
-  MODEL: SCS-CN + RATIONAL METHOD + ECOREGION 66 RATING CURVE &middot;
+  MODEL: SCS TR-55 TYPE II PEAK FLOW + ECOREGION 66 RATING CURVE &middot;
   SOIL: ERA5-LAND + HRRR API + USDM ENSEMBLE &middot;
   CALIBRATION: K = Q<sub>obs</sub>/Q<sub>mod</sub> POST-SENSOR DEPLOYMENT
 </div>
