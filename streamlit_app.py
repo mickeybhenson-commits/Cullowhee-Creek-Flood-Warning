@@ -3,7 +3,7 @@ NOAH: Cullowhee Creek Flood Warning Dashboard
 Western Carolina University — NEMO River Energy Initiative
 Jackson County, NC — Watershed Monitoring System
 
-Architecture: Two-point sub-watershed model (pre-sensor)
+Architecture: Two-point sub-watershed model
   UPPER: Headwaters sub-basin (~2,480 ac | 3.875 mi² | CN=62 | Tc=1.2h)
   LOWER: Full watershed outlet at NCCAT (~6,200 ac | 9.688 mi² | CN=68 | Tc=2.5h)
 
@@ -938,8 +938,7 @@ st.markdown(f"""
     Cullowhee Creek Watershed &mdash; Jackson County, NC
     &nbsp;|&nbsp;
     {datetime.now().strftime("%A, %B %d %Y")} &mdash; {datetime.now().strftime("%H:%M:%S")}
-    &nbsp;|&nbsp; TWO-POINT WATERSHED MODEL (PRE-SENSOR) &nbsp;|&nbsp;
-    HYD. GEOMETRY: ECOREGION 66 BLUE RIDGE COMPOSITE
+    &nbsp;
   </div>
 </div>""", unsafe_allow_html=True)
 
