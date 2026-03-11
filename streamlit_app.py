@@ -993,9 +993,9 @@ _up_max  = _up_bkf * 2.5
 
 st.markdown(
     f'<div class="upper-panel"><div class="upper-title">'
-    f'UPPER CULLOWHEE CREEK &mdash; HEADWATERS SUB-BASIN '
-    f'({UP_AREA_ACRES:,} AC | {UP_DA_SQMI:.2f} mi² | CN={UP_CN_II} | Tc={UP_TC_HRS}h) '
-    f'&nbsp;|&nbsp; FLOOD LEAD TIME TO NCCAT: ~{FLOOD_TRAVEL_MIN} MIN'
+    f'UPPER CULLOWHEE CREEK &mdash '
+    f'({UP_AREA_ACRES:,} AC | {UP_DA_SQMI:.2f} mi² '
+    f'&nbsp;|&nbsp; FLOOD LEAD TIME TO WCU: ~{FLOOD_TRAVEL_MIN} MIN'
     f'</div>',
     unsafe_allow_html=True
 )
