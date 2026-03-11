@@ -1013,7 +1013,7 @@ with u1:
          {"range": [_up_bkf * 0.95, _up_max], "color": "rgba(255,51,51,0.25)"}],
         up_depth_clr, up_depth_lbl, up_depth_clr,
         f"Stage: {st.session_state.up_depth:.2f} ft  |  Bankfull: {UP_BANKFULL} ft  |  {up_bkf_pct:.0f}% bkf",
-        "SCS TR-55 / E66"
+       
     ), height=240)
 with u2:
     _up_q_max = UP_BANKFULL_Q * 3.0
