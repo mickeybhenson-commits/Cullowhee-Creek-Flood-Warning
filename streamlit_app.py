@@ -629,8 +629,6 @@ font-family:'Rajdhani',sans-serif;color:white;">
 <div style="color:{status_clr};font-weight:700;font-size:16px;
             text-transform:uppercase;letter-spacing:2px;">{status_lbl}</div>
 <div style="font-size:12px;color:#7AACCC;margin-top:4px;">{sub_line}</div>
-<div style="font-size:9px;color:#1A5070;font-family:'Share Tech Mono',monospace;
-            margin-top:2px;">SRC: {src_line}</div>
 <script>
 (function(){{
     const canvas=document.getElementById('{gid}');
@@ -841,7 +839,7 @@ with u1:
          {"range": [_up_bkf * 0.60, _up_bkf * 0.95], "color": "rgba(255,215,0,0.20)"},
          {"range": [_up_bkf * 0.95, _up_max], "color": "rgba(255,51,51,0.25)"}],
         up_depth_clr, up_depth_lbl, up_depth_clr,
-        f"Stage: {st.session_state.up_depth:.2f} ft  |  Bankfull: {UP_BANKFULL} ft  |  {up_bkf_pct:.0f}% bkf",
+        f"Stage: {st.session_state.up_depth:.2f} ft",
         "SCS TR-55 / E66"
     ), height=240)
 
@@ -854,17 +852,11 @@ with u2:
          {"range": [UP_BANKFULL_Q * 0.45, UP_BANKFULL_Q * 0.95], "color": "rgba(255,215,0,0.20)"},
          {"range": [UP_BANKFULL_Q * 0.95, _up_q_max], "color": "rgba(255,51,51,0.25)"}],
         up_flow_clr, up_flow_lbl, up_flow_clr,
-        f"Q: {st.session_state.up_flow:.1f} cfs  |  Qbkf (E66): {UP_BANKFULL_Q:.0f} cfs",
+        f"Q: {st.session_state.up_flow:.1f} cfs",
         "SCS TR-55 / E66"
     ), height=240)
 
 with u3:
-    _era5_str = f"{sm_sources['era5_pct']:.0f}%" if sm_sources['era5_pct'] is not None else "UNAVAIL"
-    _api_str  = f"{sm_sources['api_pct']:.0f}%"
-    _usdm_str = f"{sm_sources['usdm_pct']:.0f}%" if sm_sources['usdm_pct'] is not None else "N/A"
-    _era5_active = "✓" if sm_ok and sm_07 is not None else "✗"
-    _usdm_active = "✓" if usdm_level >= 0 else "✗"
-
     st.markdown(f"""
 <div style="background:rgba(0,50,30,0.18); border:1px solid rgba(0,180,100,0.22);
             border-radius:9px; padding:14px 16px; font-family:'Share Tech Mono',monospace;">
@@ -876,22 +868,6 @@ with u3:
               margin:6px 0 4px;">{soil_sat_up:.1f}%</div>
   <div style="font-size:0.7em; color:#5AACD0; text-align:center; margin-bottom:8px;">
     stored: {soil_stored_up:.2f}&quot; &nbsp;|&nbsp; pore capacity
-  </div>
-  <div style="font-size:0.63em; color:#3A7050; text-align:center; margin-bottom:10px;
-              font-style:italic;">
-    watershed avg {soil_sat_lo:.1f}% &times; drain factor {_UP_DRAIN_FACTOR:.3f}
-  </div>
-  <div style="display:grid; grid-template-columns:auto 1fr auto; gap:3px 8px;
-              font-size:0.68em; align-items:center;">
-    <span style="color:#3A8050;">{_era5_active}</span>
-    <span style="color:#7AACCC;">ERA5-Land &nbsp;<span style="color:#2A6050;font-size:0.85em;">w={sm_sources['w_era5']:.0%}</span></span>
-    <span style="color:#AACCDD;">{_era5_str}</span>
-    <span style="color:#3A8050;">&#x2713;</span>
-    <span style="color:#7AACCC;">API/HRRR 5-day &nbsp;<span style="color:#2A6050;font-size:0.85em;">w={sm_sources['w_api']:.0%}</span></span>
-    <span style="color:#AACCDD;">{_api_str}</span>
-    <span style="color:#3A8050;">{_usdm_active}</span>
-    <span style="color:#7AACCC;">USDM &nbsp;<span style="color:#2A6050;font-size:0.85em;">w={sm_sources['w_usdm']:.0%}</span></span>
-    <span style="color:#AACCDD;">{_usdm_str}</span>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -921,7 +897,7 @@ with l1:
          {"range": [_lo_bkf * 0.60, _lo_bkf * 0.95], "color": "rgba(255,215,0,0.20)"},
          {"range": [_lo_bkf * 0.95, _lo_max], "color": "rgba(255,51,51,0.25)"}],
         lo_depth_clr, lo_depth_lbl, lo_depth_clr,
-        f"Stage: {st.session_state.lo_depth:.2f} ft  |  Bankfull: {LO_BANKFULL} ft  |  {lo_bkf_pct:.0f}% bkf",
+        f"Stage: {st.session_state.lo_depth:.2f} ft",
         "SCS TR-55 / E66"
     ), height=240)
 
@@ -934,17 +910,11 @@ with l2:
          {"range": [LO_BANKFULL_Q * 0.45, LO_BANKFULL_Q * 0.95], "color": "rgba(255,215,0,0.20)"},
          {"range": [LO_BANKFULL_Q * 0.95, _lo_q_max], "color": "rgba(255,51,51,0.25)"}],
         lo_flow_clr, lo_flow_lbl, lo_flow_clr,
-        f"Q: {st.session_state.lo_flow:.1f} cfs  |  Qbkf (E66): {LO_BANKFULL_Q:.0f} cfs",
+        f"Q: {st.session_state.lo_flow:.1f} cfs",
         "SCS TR-55 / E66"
     ), height=240)
 
 with l3:
-    _era5_str = f"{sm_sources['era5_pct']:.0f}%" if sm_sources['era5_pct'] is not None else "UNAVAIL"
-    _api_str  = f"{sm_sources['api_pct']:.0f}%"
-    _usdm_str = f"{sm_sources['usdm_pct']:.0f}%" if sm_sources['usdm_pct'] is not None else "N/A"
-    _era5_active = "✓" if sm_ok and sm_07 is not None else "✗"
-    _usdm_active = "✓" if usdm_level >= 0 else "✗"
-
     st.markdown(f"""
 <div style="background:rgba(0,50,120,0.18); border:1px solid rgba(0,119,255,0.22);
             border-radius:9px; padding:14px 16px; font-family:'Share Tech Mono',monospace;">
@@ -956,18 +926,6 @@ with l3:
               margin:6px 0 4px;">{soil_sat_lo:.1f}%</div>
   <div style="font-size:0.7em; color:#5AACD0; text-align:center; margin-bottom:12px;">
     stored: {soil_stored_lo:.2f}&quot; &nbsp;|&nbsp; pore capacity
-  </div>
-  <div style="display:grid; grid-template-columns:auto 1fr auto; gap:3px 8px;
-              font-size:0.68em; align-items:center;">
-    <span style="color:#3A8050;">{_era5_active}</span>
-    <span style="color:#7AACCC;">ERA5-Land &nbsp;<span style="color:#2A5070;font-size:0.85em;">w={sm_sources['w_era5']:.0%}</span></span>
-    <span style="color:#AACCDD;">{_era5_str}</span>
-    <span style="color:#3A8050;">✓</span>
-    <span style="color:#7AACCC;">API/HRRR 5-day &nbsp;<span style="color:#2A5070;font-size:0.85em;">w={sm_sources['w_api']:.0%}</span></span>
-    <span style="color:#AACCDD;">{_api_str}</span>
-    <span style="color:#3A8050;">{_usdm_active}</span>
-    <span style="color:#7AACCC;">USDM &nbsp;<span style="color:#2A5070;font-size:0.85em;">w={sm_sources['w_usdm']:.0%}</span></span>
-    <span style="color:#AACCDD;">{_usdm_str}</span>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -997,12 +955,6 @@ st.markdown(f"""
     <div style="font-size:1.1em; color:{up_flow_clr};">{st.session_state.up_flow:.1f} cfs</div>
     <div style="font-family:'Share Tech Mono',monospace; font-size:0.72em; color:{comp_clr_up};
                 margin-top:6px; letter-spacing:2px;">{up_depth_lbl}</div>
-    <div style="font-size:0.72em; color:#445566; margin-top:4px;">
-      Bankfull: {UP_BANKFULL} ft &nbsp;|&nbsp; Q<sub>bkf</sub>: {UP_BANKFULL_Q:.0f} cfs
-    </div>
-    <div style="font-size:0.68em; color:#1A4A60; margin-top:2px;">
-      {up_bkf_pct:.0f}% of bankfull &nbsp;|&nbsp; W={UP_WIDTH_FT:.0f} ft
-    </div>
   </div>
 
   <div style="background:rgba(0,100,200,0.07); border:1px solid rgba(0,119,255,0.20);
@@ -1023,12 +975,6 @@ st.markdown(f"""
     <div style="font-size:1.1em; color:{lo_flow_clr};">{st.session_state.lo_flow:.1f} cfs</div>
     <div style="font-family:'Share Tech Mono',monospace; font-size:0.72em; color:{comp_clr_lo};
                 margin-top:6px; letter-spacing:2px;">{lo_depth_lbl}</div>
-    <div style="font-size:0.72em; color:#445566; margin-top:4px;">
-      Bankfull: {LO_BANKFULL} ft &nbsp;|&nbsp; Q<sub>bkf</sub>: {LO_BANKFULL_Q:.0f} cfs
-    </div>
-    <div style="font-size:0.68em; color:#1A4A60; margin-top:2px;">
-      {lo_bkf_pct:.0f}% of bankfull &nbsp;|&nbsp; W={LO_WIDTH_FT:.0f} ft
-    </div>
   </div>
 
 </div>
@@ -1049,15 +995,6 @@ with tw2:
         ),
         use_container_width=True
     )
-
-st.markdown(f"""
-<div style="font-family:'Share Tech Mono',monospace; font-size:0.68em; color:#2A5070;
-            text-align:center; margin-top:0px; letter-spacing:1px;">
-  MODEL: SCS TR-55 TYPE II PEAK FLOW + ECOREGION 66 RATING CURVE &middot;
-  SOIL: ERA5-LAND + HRRR API + USDM ENSEMBLE &middot;
-  CALIBRATION: K = Q<sub>obs</sub>/Q<sub>mod</sub> POST-SENSOR DEPLOYMENT
-</div>
-""", unsafe_allow_html=True)
 
 st.markdown('</div>', unsafe_allow_html=True)
 
