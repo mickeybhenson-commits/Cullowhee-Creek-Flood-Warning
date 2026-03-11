@@ -2,51 +2,18 @@
 NOAH: Cullowhee Creek Flood Warning Dashboard
 Western Carolina University — NEMO River Energy Initiative
 Jackson County, NC — Watershed Monitoring System
-
-Architecture: Two-point sub-watershed model
-  UPPER: Headwaters sub-basin (~2,480 ac | 3.875 mi² | CN=62 | Tc=1.2h)
-  LOWER: Full watershed outlet at NCCAT (~6,200 ac | 9.688 mi² | CN=68 | Tc=2.5h)
-
-Hydrologic engine: SCS TR-55 Type II peak flow (NRCS 1986)
-  Replaces Rational Method (valid only ≤640 ac; discarded Tc entirely).
-  TR-55 is the NRCS/NWS standard for 1–20 mi² humid Appalachian watersheds.
-  Tc is now used correctly: upper (1.2h) vs lower (2.5h) gives physically
-  distinct storm responses, especially for fast convective events vs slow frontal.
-
-Hydraulic geometry baseline — ECOREGION 66 BLUE RIDGE COMPOSITE CURVES:
-  Source: Henson et al. (2014) NC Mountain Streams + SCDNR Ecoregion 66 (May 2020)
-  50 stable reference reaches across Southern Blue Ridge physiographic province.
-  Regression forms:  Qbkf = 35.0 × DA^0.850  (cfs, DA in mi²)
-                     Wbkf = 12.5 × DA^0.460  (ft)
-                     Dbkf = 1.05 × DA^0.310  (ft, mean riffle depth)
-  Applied to derive rating curve A, bankfull stage, and channel width for both sub-basins.
-  K-correction (Q_obs/Q_mod) will supersede regional priors after 10–15 storm events.
-  Caveat: Southern Blue Ridge hydraulic geometry is also influenced by watershed slope
-    and local channel characteristics beyond drainage area alone (Carey et al. 2023,
-    IJRBM — "Drainage area is not enough"). Individual reach scatter ≈ ±40-60%.
-
-Data sources:
-  - Atmospheric:   Open-Meteo HRRR/GFS (real-time, no API key)
-  - Soil moisture: 3-SOURCE ENSEMBLE:
-                     ERA5-Land volumetric (0-7cm, 7-28cm) — physics baseline, ~5 day lag
-                     HRRR Antecedent Precip Index (5-day) — zero lag, real-time
-                     USDA Drought Monitor (Jackson Co. FIPS 37099) — weekly expert synthesis
-  - QPF / PoP:     NWS GSP Gridpoint API (Greenville-Spartanburg WFO)
-  - Radar:         NEXRAD WSR-88D KGSP — same feed used by NWS operations and Jackson Co. EM
-
-Version: 2026-03  |  Status: Pre-sensor (modeled)  |  Next: NCCAT Blues Notecard deployment
 """
 
 import math
-import streamlit as st
-import requests
 import json
 import time
-import numpy as np
-import plotly.graph_objects as go
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 from collections import defaultdict
+
+import requests
+import streamlit as st
+import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
 
 
@@ -57,7 +24,9 @@ from streamlit_autorefresh import st_autorefresh
 st.set_page_config(page_title="NOAH: Cullowhee Flood Warning", layout="wide")
 st_autorefresh(interval=30000, key="refresh")
 
-LAT, LON = 35.3079, -83.1746   # Cullowhee Creek / NCCAT vicinity
+LAT, LON = 35.3079, -83.1746
+ET_TZ = ZoneInfo("America/New_York")
+UTC_TZ = ZoneInfo("UTC")
 
 st.markdown("""
 <style>
@@ -67,16 +36,19 @@ html, body, .stApp { background-color: #04090F; color: #E0E8F0; font-family: 'Ra
                background: rgba(0,100,200,0.07); border-radius: 0 8px 8px 0; }
 .site-title  { font-size: 2.4em; font-weight: 700; color: #FFFFFF; margin: 0; letter-spacing: 2px; }
 .site-sub    { font-family: 'Share Tech Mono', monospace; font-size: 0.75em; color: #5AACD0; margin-top: 4px; }
+
 .panel       { background: rgba(8,16,28,0.88); border: 1px solid rgba(0,119,255,0.18);
                border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; }
 .panel-title { font-family: 'Share Tech Mono', monospace; font-size: 0.78em; color: #0077FF;
                text-transform: uppercase; letter-spacing: 3px;
                border-bottom: 1px solid rgba(0,119,255,0.18); padding-bottom: 8px; margin-bottom: 14px; }
+
 .upper-panel { background: rgba(8,16,28,0.88); border: 1px solid rgba(0,180,100,0.25);
                border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; }
 .upper-title { font-family: 'Share Tech Mono', monospace; font-size: 0.78em; color: #00CC77;
                text-transform: uppercase; letter-spacing: 3px;
                border-bottom: 1px solid rgba(0,180,100,0.25); padding-bottom: 8px; margin-bottom: 14px; }
+
 .lower-panel { background: rgba(8,16,28,0.88); border: 1px solid rgba(0,119,255,0.25);
                border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; }
 .lower-title { font-family: 'Share Tech Mono', monospace; font-size: 0.78em; color: #0099FF;
@@ -103,9 +75,7 @@ LO_RATING_B        = 2.30
 LO_BASEFLOW        = 9.0
 LO_BANKFULL        = 2.87
 LO_BANKFULL_Q      = 241.2
-LO_BANKFULL_MEAND  = 2.12
 LO_WIDTH_FT        = 35.5
-LO_MANN_N          = 0.045
 
 UP_AREA_ACRES      = 2480
 UP_DA_SQMI         = 3.875
@@ -116,50 +86,237 @@ UP_RATING_B        = 2.15
 UP_BASEFLOW        = 3.5
 UP_BANKFULL        = 2.16
 UP_BANKFULL_Q      = 110.7
-UP_BANKFULL_MEAND  = 1.60
 UP_WIDTH_FT        = 23.3
+
 FLOOD_TRAVEL_MIN   = 65
 
+_USDM_IMPLIED_SAT = {1: 55.0, 2: 40.0, 3: 27.0, 4: 17.0, 5: 8.0}
+_USDM_CEILING     = {0: 100, 1: 65, 2: 50, 3: 35, 4: 22, 5: 12}
+
+_TR55_IAPRATIO = [0.10, 0.20, 0.30, 0.35, 0.40, 0.45, 0.50]
+_TR55_C0       = [2.55323, 2.23537, 2.10304, 2.18219, 2.17339, 2.16251, 2.14583]
+_TR55_C1       = [-0.61512, -0.50537, -0.51488, -0.50258, -0.48985, -0.47856, -0.46772]
+_TR55_C2       = [-0.16403, -0.11657, -0.08648, -0.09057, -0.09084, -0.09303, -0.09373]
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  2.5  ECOREGION 66 BLUE RIDGE REGIONAL CURVES
+#  3. HIDDEN FORECAST ROUTER
+#     Internally switches by lead time; nothing about source selection is shown
+#     in the UI.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_E66_Q_COEF, _E66_Q_EXP = 35.0, 0.850
-_E66_W_COEF, _E66_W_EXP = 12.5, 0.460
-_E66_D_COEF, _E66_D_EXP = 1.05, 0.310
-_E66_DEPTH_STAGE_RATIO  = 1.35
+def _hours_ahead(target_dt: datetime, now_dt: datetime) -> float:
+    return (target_dt - now_dt).total_seconds() / 3600.0
 
 
-def ecoregion66_bankfull(da_sqmi: float) -> dict:
-    da = float(da_sqmi)
-    qbkf       = _E66_Q_COEF * da ** _E66_Q_EXP
-    wbkf       = _E66_W_COEF * da ** _E66_W_EXP
-    dbkf_mean  = _E66_D_COEF * da ** _E66_D_EXP
-    abkf       = wbkf * dbkf_mean
-    dbkf_stage = dbkf_mean * _E66_DEPTH_STAGE_RATIO
-    rating_a_230 = qbkf / (dbkf_stage ** 2.30)
+def _choose_bucket(lead_hours: float) -> str:
+    if lead_hours <= 18:
+        return "short_range"
+    elif lead_hours <= 48:
+        return "mid_range"
+    return "extended"
+
+
+def _weighted_merge(a: dict, b: dict, wa: float, wb: float) -> dict:
+    total = wa + wb
     return {
-        "qbkf":       round(qbkf, 1),
-        "wbkf":       round(wbkf, 1),
-        "dbkf_mean":  round(dbkf_mean, 2),
-        "abkf":       round(abkf, 1),
-        "dbkf_stage": round(dbkf_stage, 2),
-        "rating_a":   round(rating_a_230, 1),
-        "da_sqmi":    round(da, 3),
+        "time": a["time"],
+        "temp_f": (a["temp_f"] * wa + b["temp_f"] * wb) / total,
+        "qpf_in": (a["qpf_in"] * wa + b["qpf_in"] * wb) / total,
+        "pop":    (a["pop"] * wa + b["pop"] * wb) / total,
     }
 
 
-_E66_LO = ecoregion66_bankfull(LO_DA_SQMI)
-_E66_UP = ecoregion66_bankfull(UP_DA_SQMI)
+@st.cache_data(ttl=900)
+def _fetch_short_range_hourly():
+    """
+    Hidden near-term hourly feed.
+    Returns normalized hourly records for ~0–48h.
+    """
+    try:
+        r = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": LAT,
+                "longitude": LON,
+                "hourly": "temperature_2m,precipitation,precipitation_probability",
+                "temperature_unit": "fahrenheit",
+                "precipitation_unit": "inch",
+                "forecast_days": 3,
+            },
+            timeout=15,
+        ).json()
+
+        times = r["hourly"]["time"]
+        temp  = r["hourly"]["temperature_2m"]
+        qpf   = r["hourly"]["precipitation"]
+        pop   = r["hourly"].get("precipitation_probability", [0] * len(times))
+
+        out = []
+        for i, t in enumerate(times):
+            try:
+                ts = datetime.fromisoformat(t).replace(tzinfo=UTC_TZ).astimezone(ET_TZ)
+                out.append({
+                    "time": ts,
+                    "temp_f": float(temp[i] or 0.0),
+                    "qpf_in": float(qpf[i] or 0.0),
+                    "pop": float(pop[i] or 0.0),
+                })
+            except Exception:
+                continue
+        return out
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=1800)
+def _fetch_official_daily():
+    """
+    Hidden daily forecast feed.
+    Returns day-level records for ~7 days.
+    """
+    try:
+        hdrs = {"User-Agent": "NOAH-FloodWarning/1.0"}
+        pts = requests.get(
+            f"https://api.weather.gov/points/{LAT},{LON}",
+            headers=hdrs,
+            timeout=10
+        ).json()["properties"]
+
+        periods = requests.get(
+            pts["forecast"],
+            headers=hdrs,
+            timeout=10
+        ).json()["properties"]["periods"]
+
+        grid = requests.get(
+            pts["forecastGridData"],
+            headers=hdrs,
+            timeout=15
+        ).json()["properties"]
+
+        qpf_by_date = defaultdict(float)
+        for entry in grid.get("quantitativePrecipitation", {}).get("values", []):
+            vt = entry["validTime"].split("/")[0]
+            val = entry["value"] or 0.0
+            try:
+                d = datetime.fromisoformat(vt).astimezone(ET_TZ).strftime("%Y-%m-%d")
+                qpf_by_date[d] += float(val) * 0.0393701
+            except Exception:
+                pass
+
+        temp_by_date = {}
+        for entry in grid.get("maxTemperature", {}).get("values", []):
+            vt = entry["validTime"].split("/")[0]
+            val = entry["value"]
+            if val is None:
+                continue
+            try:
+                d = datetime.fromisoformat(vt).astimezone(ET_TZ).strftime("%Y-%m-%d")
+                tf = float(val) * 9 / 5 + 32
+                if d not in temp_by_date or tf > temp_by_date[d]:
+                    temp_by_date[d] = tf
+            except Exception:
+                pass
+
+        out = []
+        seen = set()
+        for p in periods:
+            if not p.get("isDaytime", False):
+                continue
+            try:
+                dt = datetime.fromisoformat(p["startTime"]).astimezone(ET_TZ)
+                dkey = dt.strftime("%Y-%m-%d")
+                if dkey in seen:
+                    continue
+                seen.add(dkey)
+                out.append({
+                    "time": dt.replace(hour=12, minute=0, second=0, microsecond=0),
+                    "date": dkey,
+                    "short_name": dt.strftime("%a").upper(),
+                    "date_label": dt.strftime("%m/%d"),
+                    "temp_f": round(float(temp_by_date.get(dkey, p["temperature"])), 1),
+                    "qpf_in": round(float(qpf_by_date.get(dkey, 0.0)), 2),
+                    "pop": round(float((p.get("probabilityOfPrecipitation") or {}).get("value") or 0), 1),
+                    "icon_txt": str(p.get("shortForecast", "")),
+                })
+            except Exception:
+                continue
+
+        return out[:7]
+    except Exception:
+        return []
+
+
+def _build_unified_daily_forecast():
+    """
+    Public-facing forecast object.
+    Internal source switching is hidden.
+    """
+    now_et = datetime.now(ET_TZ)
+    hourly = _fetch_short_range_hourly()
+    daily  = _fetch_official_daily()
+
+    # Convert hourly -> daily candidates for the first 2 days
+    hourly_by_day = defaultdict(list)
+    for r in hourly:
+        lead = _hours_ahead(r["time"], now_et)
+        if -3 <= lead <= 60:
+            hourly_by_day[r["time"].strftime("%Y-%m-%d")].append(r)
+
+    short_daily = {}
+    for dkey, rows in hourly_by_day.items():
+        dt = datetime.strptime(dkey, "%Y-%m-%d").replace(tzinfo=ET_TZ, hour=12)
+        short_daily[dkey] = {
+            "time": dt,
+            "date": dkey,
+            "short_name": dt.strftime("%a").upper(),
+            "date_label": dt.strftime("%m/%d"),
+            "temp_f": round(max(r["temp_f"] for r in rows), 1),
+            "qpf_in": round(sum(r["qpf_in"] for r in rows), 2),
+            "pop": round(max(r["pop"] for r in rows), 1),
+            "icon_txt": "",
+        }
+
+    daily_map = {r["date"]: r for r in daily}
+    all_dates = sorted(set(short_daily) | set(daily_map))
+
+    unified = []
+    for dkey in all_dates:
+        target = datetime.strptime(dkey, "%Y-%m-%d").replace(tzinfo=ET_TZ, hour=12)
+        lead = _hours_ahead(target, now_et)
+
+        short_rec = short_daily.get(dkey)
+        daily_rec = daily_map.get(dkey)
+
+        # Blend around first 1–2 days, then use longer-range daily
+        if 12 <= lead <= 18 and short_rec and daily_rec:
+            wb = (lead - 12) / 6.0
+            wa = 1.0 - wb
+            merged = _weighted_merge(short_rec, daily_rec, wa, wb)
+            merged.update({
+                "date": dkey,
+                "short_name": target.strftime("%a").upper(),
+                "date_label": target.strftime("%m/%d"),
+                "icon_txt": daily_rec.get("icon_txt", ""),
+            })
+            unified.append(merged)
+        elif _choose_bucket(lead) == "short_range" and short_rec:
+            unified.append(short_rec)
+        elif daily_rec:
+            unified.append(daily_rec)
+        elif short_rec:
+            unified.append(short_rec)
+
+    return unified[:7]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  3. DATA ACQUISITION
+#  4. DATA ACQUISITION
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=300)
-def fetch_openmeteo_current():
+def fetch_current_conditions():
     try:
         r = requests.get(
             "https://api.open-meteo.com/v1/forecast",
@@ -176,87 +333,25 @@ def fetch_openmeteo_current():
             },
             timeout=10
         ).json()
+
         c = r["current"]
         return {
             "ok":        True,
-            "temp":      round(float(c.get("temperature_2m", 50)), 2),
-            "hum":       round(float(c.get("relative_humidity_2m", 50)), 2),
-            "wind":      round(float(c.get("wind_speed_10m", 0)), 2),
-            "wind_gust": round(float(c.get("wind_gusts_10m", 0)), 2),
-            "wind_dir":  round(float(c.get("wind_direction_10m", 0)), 2),
+            "temp":      round(float(c.get("temperature_2m", 50)), 1),
+            "hum":       round(float(c.get("relative_humidity_2m", 50)), 1),
+            "wind":      round(float(c.get("wind_speed_10m", 0)), 1),
+            "wind_gust": round(float(c.get("wind_gusts_10m", 0)), 1),
+            "wind_dir":  round(float(c.get("wind_direction_10m", 0)), 1),
             "press":     round(c.get("surface_pressure", 1013.25) * 0.02953, 2),
-            "precip":    round(float(c.get("precipitation", 0)), 2),
+            "precip":    round(float(c.get("precipitation", 0)), 1),
             "wcode":     c.get("weather_code", 0),
         }
     except Exception:
-        return {"ok": False, "temp": 50.0, "hum": 50.0, "wind": 0.0,
-                "wind_gust": 0.0, "wind_dir": 0.0, "press": 29.92,
-                "precip": 0.0, "wcode": 0}
-
-
-@st.cache_data(ttl=1800)
-def fetch_nws_forecast():
-    try:
-        hdrs = {"User-Agent": "NOAH-FloodWarning/1.0 (WCU NEMO Project)"}
-        pts  = requests.get(
-            f"https://api.weather.gov/points/{LAT},{LON}",
-            headers=hdrs, timeout=10
-        ).json()["properties"]
-        wfo, gx, gy = pts["gridId"], pts["gridX"], pts["gridY"]
-        periods = requests.get(
-            pts["forecast"], headers=hdrs, timeout=10
-        ).json()["properties"]["periods"]
-        grid = requests.get(
-            f"https://api.weather.gov/gridpoints/{wfo}/{gx},{gy}",
-            headers=hdrs, timeout=15
-        ).json()["properties"]
-
-        qpf_by_date = defaultdict(float)
-        for entry in grid.get("quantitativePrecipitation", {}).get("values", []):
-            vt = entry["validTime"].split("/")[0]
-            val = entry["value"] or 0
-            try:
-                d = datetime.fromisoformat(vt).strftime("%Y-%m-%d")
-                qpf_by_date[d] += val * 0.0393701
-            except Exception:
-                pass
-
-        temp_by_date = {}
-        for entry in grid.get("maxTemperature", {}).get("values", []):
-            vt = entry["validTime"].split("/")[0]
-            val = entry["value"]
-            if val is not None:
-                try:
-                    d = datetime.fromisoformat(vt).strftime("%Y-%m-%d")
-                    tf = round(val * 9 / 5 + 32, 2)
-                    if d not in temp_by_date or tf > temp_by_date[d]:
-                        temp_by_date[d] = tf
-                except Exception:
-                    pass
-
-        result, seen = [], set()
-        for p in periods:
-            if not p["isDaytime"]:
-                continue
-            try:
-                dt = datetime.fromisoformat(p["startTime"][:10])
-                dkey = dt.strftime("%Y-%m-%d")
-                if dkey in seen or len(result) >= 7:
-                    continue
-                seen.add(dkey)
-                result.append({
-                    "short_name": dt.strftime("%a").upper(),
-                    "date":       dt.strftime("%m/%d"),
-                    "temp":       round(temp_by_date.get(dkey, float(p["temperature"])), 2),
-                    "qpf":        round(qpf_by_date.get(dkey, 0.0), 2),
-                    "pop":        round(float((p.get("probabilityOfPrecipitation") or {}).get("value") or 0), 2),
-                    "icon_txt":   str(p.get("shortForecast", "")),
-                })
-            except Exception:
-                continue
-        return result, True, None
-    except Exception as e:
-        return [], False, str(e)
+        return {
+            "ok": False, "temp": 50.0, "hum": 50.0, "wind": 0.0,
+            "wind_gust": 0.0, "wind_dir": 0.0, "press": 29.92,
+            "precip": 0.0, "wcode": 0
+        }
 
 
 @st.cache_data(ttl=1800)
@@ -374,7 +469,7 @@ def fetch_usdm_drought():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  4. HYDRO-MODELING
+#  5. HYDRO-MODELING
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def calc_era5_sat_pct(sm_07, sm_728):
@@ -382,7 +477,7 @@ def calc_era5_sat_pct(sm_07, sm_728):
     sm_728 = min(sm_728, SOIL_POROSITY)
     sm_avg = min((sm_07 * 0.55) + (sm_728 * 0.45), SOIL_POROSITY)
     sat_range = SOIL_POROSITY - SOIL_WILT_PT
-    return round(min(100.0, max(0.0, (sm_avg - SOIL_WILT_PT) / sat_range * 100)), 2)
+    return round(min(100.0, max(0.0, (sm_avg - SOIL_WILT_PT) / sat_range * 100)), 1)
 
 
 def calc_api_sat_pct(rain_5d):
@@ -398,10 +493,6 @@ def calc_api_sat_pct(rain_5d):
     else:
         sat = 68.0 + (a - 2.80) / 2.20 * 22.0
     return round(min(90.0, max(5.0, sat)), 1)
-
-
-_USDM_IMPLIED_SAT = {1: 55.0, 2: 40.0, 3: 27.0, 4: 17.0, 5: 8.0}
-_USDM_CEILING     = {0: 100, 1: 65, 2: 50, 3: 35, 4: 22, 5: 12}
 
 
 def calc_soil_saturation_ensemble(sm_07, sm_728, sm_ok, rain_5d, usdm_level):
@@ -455,12 +546,6 @@ def calc_soil_saturation_ensemble(sm_07, sm_728, sm_ok, rain_5d, usdm_level):
         "w_usdm":   round(w_usdm, 2),
     }
     return sat_pct, stored_in, color, sources
-
-
-_TR55_IAPRATIO = [0.10, 0.20, 0.30, 0.35, 0.40, 0.45, 0.50]
-_TR55_C0       = [2.55323, 2.23537, 2.10304, 2.18219, 2.17339, 2.16251, 2.14583]
-_TR55_C1       = [-0.61512, -0.50537, -0.51488, -0.50258, -0.48985, -0.47856, -0.46772]
-_TR55_C2       = [-0.16403, -0.11657, -0.08648, -0.09057, -0.09084, -0.09303, -0.09373]
 
 
 def _tr55_unit_peak(tc_hrs: float, ia_p: float) -> float:
@@ -524,7 +609,7 @@ def flood_threat_score(soil_sat, qpf_24h, pop_24h):
         (soil_sat * 0.40) +
         (min(100.0, qpf_24h * 40) * 0.35) +
         (pop_24h * 0.25)
-    ), 2)
+    ), 1)
 
 
 def threat_meta(score):
@@ -590,19 +675,17 @@ def nws_icon(txt):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  5. UI COMPONENT BUILDERS
+#  6. UI COMPONENT BUILDERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def make_dial(v, t, min_v, max_v, u, c, sub="", src=""):
     parts = [f"<b>{t}</b>"]
     if sub:
         parts.append(f"<span style='font-size:11px;color:#7AACCC'>{sub}</span>")
-    if src:
-        parts.append(f"<span style='font-size:9px;color:#2A6080'>{src}</span>")
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
         value=v,
-        number={"suffix": u, "font": {"size": 24, "color": "white"}, "valueformat": ".2f"},
+        number={"suffix": u, "font": {"size": 24, "color": "white"}, "valueformat": ".1f"},
         title={"text": "<br>".join(parts), "font": {"size": 13, "color": "#A0C8E0"}},
         gauge={
             "axis": {"range": [min_v, max_v], "tickfont": {"size": 9, "color": "#334455"}},
@@ -661,11 +744,11 @@ font-family:'Rajdhani',sans-serif;color:white;">
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  6. DATA EXECUTION
+#  7. DATA EXECUTION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-noaa                                              = fetch_openmeteo_current()
-forecast, fc_ok, fc_err                           = fetch_nws_forecast()
+noaa                                              = fetch_current_conditions()
+forecast                                          = _build_unified_daily_forecast()
 rain_14d, rain_7d, snow_7d, rain_24h, rain_5d, _ = fetch_precip_history()
 sm_07, sm_728, sm_ts, sm_ok                       = fetch_era5_soil_moisture()
 usdm_level, usdm_label, usdm_date                 = fetch_usdm_drought()
@@ -694,19 +777,7 @@ soil_color_up = _sat_color(soil_sat_up)
 soil_stored_lo = soil_stored
 soil_stored_up = _sat_stored(soil_sat_up)
 
-if sm_ok and sm_07 is not None:
-    sm_range   = SOIL_POROSITY - SOIL_WILT_PT
-    sm_07_c    = min(sm_07, SOIL_POROSITY)
-    sm_728_c   = min(sm_728, SOIL_POROSITY)
-    sm_07_pct  = round(max(0, min(100, (sm_07_c - SOIL_WILT_PT) / sm_range * 100)), 1)
-    sm_728_pct = round(max(0, min(100, (sm_728_c - SOIL_WILT_PT) / sm_range * 100)), 1)
-    sm_ts_str  = sm_ts[:13].replace("T", " ") + " UTC" if sm_ts else "---"
-else:
-    sm_07_c = sm_728_c = 0.0
-    sm_07_pct = sm_728_pct = 0.0
-    sm_ts_str = "ERA5 UNAVAILABLE"
-
-qpf_24h = forecast[0]["qpf"] if forecast else 0.0
+qpf_24h = forecast[0]["qpf_in"] if forecast else 0.0
 pop_24h = forecast[0]["pop"] if forecast else 0.0
 
 threat = flood_threat_score(soil_sat_lo, qpf_24h, pop_24h)
@@ -758,10 +829,10 @@ _tw_clr = ("#FF3333" if travel_min < 25 else
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  7. RENDER
+#  8. RENDER
 # ═══════════════════════════════════════════════════════════════════════════════
 
-now_et = datetime.now(ZoneInfo("America/New_York"))
+now_et = datetime.now(ET_TZ)
 
 st.markdown(f"""
 <div class="site-header">
@@ -840,7 +911,7 @@ with u1:
          {"range": [_up_bkf * 0.95, _up_max], "color": "rgba(255,51,51,0.25)"}],
         up_depth_clr, up_depth_lbl, up_depth_clr,
         f"Stage: {st.session_state.up_depth:.2f} ft",
-        "SCS TR-55 / E66"
+        ""
     ), height=240)
 
 with u2:
@@ -853,7 +924,7 @@ with u2:
          {"range": [UP_BANKFULL_Q * 0.95, _up_q_max], "color": "rgba(255,51,51,0.25)"}],
         up_flow_clr, up_flow_lbl, up_flow_clr,
         f"Q: {st.session_state.up_flow:.1f} cfs",
-        "SCS TR-55 / E66"
+        ""
     ), height=240)
 
 with u3:
@@ -862,7 +933,7 @@ with u3:
             border-radius:9px; padding:14px 16px; font-family:'Share Tech Mono',monospace;">
   <div style="font-size:0.72em; color:#00CC77; letter-spacing:3px; margin-bottom:10px;
               border-bottom:1px solid rgba(0,180,100,0.2); padding-bottom:6px;">
-    SOIL SATURATION &mdash; 3-SOURCE ENSEMBLE
+    SOIL SATURATION
   </div>
   <div style="font-size:2.5em; font-weight:700; color:{soil_color_up}; text-align:center;
               margin:6px 0 4px;">{soil_sat_up:.1f}%</div>
@@ -898,7 +969,7 @@ with l1:
          {"range": [_lo_bkf * 0.95, _lo_max], "color": "rgba(255,51,51,0.25)"}],
         lo_depth_clr, lo_depth_lbl, lo_depth_clr,
         f"Stage: {st.session_state.lo_depth:.2f} ft",
-        "SCS TR-55 / E66"
+        ""
     ), height=240)
 
 with l2:
@@ -911,7 +982,7 @@ with l2:
          {"range": [LO_BANKFULL_Q * 0.95, _lo_q_max], "color": "rgba(255,51,51,0.25)"}],
         lo_flow_clr, lo_flow_lbl, lo_flow_clr,
         f"Q: {st.session_state.lo_flow:.1f} cfs",
-        "SCS TR-55 / E66"
+        ""
     ), height=240)
 
 with l3:
@@ -920,7 +991,7 @@ with l3:
             border-radius:9px; padding:14px 16px; font-family:'Share Tech Mono',monospace;">
   <div style="font-size:0.72em; color:#0077FF; letter-spacing:3px; margin-bottom:10px;
               border-bottom:1px solid rgba(0,119,255,0.2); padding-bottom:6px;">
-    SOIL SATURATION &mdash; 3-SOURCE ENSEMBLE
+    SOIL SATURATION
   </div>
   <div style="font-size:2.5em; font-weight:700; color:{soil_color_lo}; text-align:center;
               margin:6px 0 4px;">{soil_sat_lo:.1f}%</div>
@@ -990,8 +1061,7 @@ with tw2:
             90,
             " min",
             _tw_clr,
-            sub="UPPER → LOWER",
-            src="Dynamic celerity estimate"
+            sub="UPPER → LOWER"
         ),
         use_container_width=True
     )
@@ -1000,14 +1070,14 @@ st.markdown('</div>', unsafe_allow_html=True)
 
 
 # ── PANEL 6: 7-DAY FLOOD OUTLOOK ─────────────────────────────────────────────
-st.markdown('<div class="panel"><div class="panel-title">7-DAY FLOOD &amp; RAINFALL OUTLOOK &mdash; CULLOWHEE CREEK WATERSHED (NWS GSP GRIDPOINT)</div>', unsafe_allow_html=True)
+st.markdown('<div class="panel"><div class="panel-title">7-DAY FLOOD &amp; RAINFALL OUTLOOK &mdash; CULLOWHEE CREEK WATERSHED</div>', unsafe_allow_html=True)
 
-if not fc_ok:
-    st.warning(f"NWS forecast unavailable — {fc_err}")
-elif forecast:
+if not forecast:
+    st.warning("Forecast unavailable.")
+else:
     pcols = st.columns(7)
-    for i, d in enumerate(forecast):
-        risk = min(100.0, round((soil_sat_lo * 0.35) + (d["pop"] * 0.35) + (d["qpf"] * 20), 2))
+    for i, d in enumerate(forecast[:7]):
+        risk = min(100.0, round((soil_sat_lo * 0.35) + (d["pop"] * 0.35) + (d["qpf_in"] * 20), 1))
         color = "#00FF9C" if risk < 30 else "#FFFF00" if risk < 50 else "#FFD700" if risk < 65 else "#FF8800" if risk < 80 else "#FF3333"
 
         with pcols[i]:
@@ -1016,13 +1086,13 @@ elif forecast:
                 + color
                 + '; border-radius:8px; padding:12px 8px; text-align:center;">'
                 + '<div style="font-weight:700; font-size:1.1em;">' + d["short_name"] + '</div>'
-                + '<div style="font-size:0.75em; color:#5A7090; margin-bottom:4px;">' + d["date"] + '</div>'
-                + '<div style="font-family:\'Share Tech Mono\',monospace; font-size:0.75em; color:#7AACCC; margin-bottom:4px;">' + nws_icon(d["icon_txt"]) + '</div>'
+                + '<div style="font-size:0.75em; color:#5A7090; margin-bottom:4px;">' + d["date_label"] + '</div>'
+                + '<div style="font-family:\'Share Tech Mono\',monospace; font-size:0.75em; color:#7AACCC; margin-bottom:4px;">' + nws_icon(d.get("icon_txt", "")) + '</div>'
                 + '<div style="color:' + color + '; font-size:1.55em; font-weight:700; margin:5px 0;">' + f'{risk:.1f}' + '%</div>'
                 + '<div style="color:' + color + '; font-family:\'Share Tech Mono\',monospace; font-size:0.72em; letter-spacing:2px; margin-bottom:4px;">FLOOD RISK</div>'
-                + '<div style="color:#00FFCC; font-family:\'Share Tech Mono\',monospace; font-size:0.85em;">' + f'{d["qpf"]:.2f}' + '&quot;</div>'
+                + '<div style="color:#00FFCC; font-family:\'Share Tech Mono\',monospace; font-size:0.85em;">' + f'{d["qpf_in"]:.2f}' + '&quot;</div>'
                 + '<div style="color:#7AACCC; font-size:0.75em;">' + f'{d["pop"]:.0f}' + '% PoP</div>'
-                + '<div style="color:#7AACCC; font-size:0.75em;">' + f'{d["temp"]:.0f}' + ' F</div>'
+                + '<div style="color:#7AACCC; font-size:0.75em;">' + f'{d["temp_f"]:.0f}' + ' F</div>'
                 + '</div>',
                 unsafe_allow_html=True
             )
@@ -1030,8 +1100,8 @@ elif forecast:
 st.markdown('</div>', unsafe_allow_html=True)
 
 
-# ── PANEL 7: NEXRAD WSR-88D RADAR (KGSP) ─────────────────────────────────────
-st.markdown('<div class="panel"><div class="panel-title">NEXRAD WSR-88D RADAR &mdash; KGSP GREENVILLE-SPARTANBURG (NWS OPERATIONAL)</div>', unsafe_allow_html=True)
+# ── PANEL 7: RADAR ───────────────────────────────────────────────────────────
+st.markdown('<div class="panel"><div class="panel-title">RADAR LOOP</div>', unsafe_allow_html=True)
 
 _cb = int(time.time() / 120)
 st.components.v1.html(f"""
@@ -1041,13 +1111,12 @@ st.components.v1.html(f"""
     <div style="display:flex; align-items:center; gap:10px;">
       <div style="width:8px; height:8px; border-radius:50%; background:#00FF9C; box-shadow:0 0 6px #00FF9C;"></div>
       <span style="color:#00CFFF; font-size:11px; font-weight:700; letter-spacing:2px;">LIVE</span>
-      <span style="color:#8899AA; font-size:11px; letter-spacing:1px;">| WSR-88D BASE REFLECTIVITY | KGSP | NWS GREENVILLE-SPARTANBURG</span>
     </div>
     <div style="color:#556677; font-size:10px; letter-spacing:1px;">AUTO-LOOP &#x21BB; 2 MIN</div>
   </div>
   <div style="position:relative; background:#000; text-align:center;">
     <img src="https://radar.weather.gov/ridge/standard/KGSP_loop.gif?v={_cb}"
-         style="width:100%; max-height:520px; object-fit:contain; display:block;" alt="KGSP NEXRAD Loop" />
+         style="width:100%; max-height:520px; object-fit:contain; display:block;" alt="Radar Loop" />
     <div style="position:absolute; bottom:0; left:0; right:0;
                 background:linear-gradient(transparent,rgba(0,0,0,0.85));
                 padding:20px 16px 8px; display:flex; justify-content:space-between; align-items:flex-end;">
@@ -1062,14 +1131,8 @@ st.components.v1.html(f"""
         <span style="display:inline-block; width:18px; height:10px; background:#e60000;"></span>
         <span style="display:inline-block; width:18px; height:10px; background:#990000;"></span>
         <span style="display:inline-block; width:18px; height:10px; background:#ff00ff;"></span>
-        <span style="color:#556677; font-size:9px; margin-left:4px;">LIGHT &rarr; EXTREME</span>
       </div>
     </div>
-  </div>
-  <div style="padding:6px 16px; background:#0a1520; border-top:1px solid #1a3a5a;
-              display:flex; justify-content:space-between;">
-    <span style="color:#445566; font-size:10px; letter-spacing:1px;">SRC: radar.weather.gov &bull; NWS OPERATIONAL DATA</span>
-    <span style="color:#445566; font-size:10px; letter-spacing:1px;">JACKSON CO. WATERSHED MONITORING SYSTEM &bull; NEMO / WCU</span>
   </div>
 </div>
 """, height=610)
