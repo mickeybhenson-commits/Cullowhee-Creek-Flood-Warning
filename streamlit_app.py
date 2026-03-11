@@ -28,6 +28,19 @@ LAT, LON = 35.3079, -83.1746
 ET_TZ = ZoneInfo("America/New_York")
 UTC_TZ = ZoneInfo("UTC")
 
+# AWN CONFIG
+# Put your real AWN endpoints here later. If unavailable, the script falls back
+# automatically without showing source information in Streamlit.
+AWN_ENABLED = True
+AWN_TIMEOUT_SEC = 8
+
+# Examples:
+#   AWN_CURRENT_URL = "https://<your-awn-endpoint-for-current>.json"
+#   AWN_HISTORY_URL = "https://<your-awn-endpoint-for-history>.json"
+# For now these can stay blank and the system will use backup data.
+AWN_CURRENT_URL = ""
+AWN_HISTORY_URL = ""
+
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap');
@@ -101,8 +114,7 @@ _TR55_C2       = [-0.16403, -0.11657, -0.08648, -0.09057, -0.09084, -0.09303, -0
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  3. HIDDEN FORECAST ROUTER
-#     Internally switches by lead time; nothing about source selection is shown
-#     in the UI.
+#     Lead-time switching is internal only. No source/provider text is shown.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _hours_ahead(target_dt: datetime, now_dt: datetime) -> float:
@@ -124,15 +136,12 @@ def _weighted_merge(a: dict, b: dict, wa: float, wb: float) -> dict:
         "temp_f": (a["temp_f"] * wa + b["temp_f"] * wb) / total,
         "qpf_in": (a["qpf_in"] * wa + b["qpf_in"] * wb) / total,
         "pop":    (a["pop"] * wa + b["pop"] * wb) / total,
+        "icon_txt": b.get("icon_txt", a.get("icon_txt", "")),
     }
 
 
 @st.cache_data(ttl=900)
-def _fetch_short_range_hourly():
-    """
-    Hidden near-term hourly feed.
-    Returns normalized hourly records for ~0–48h.
-    """
+def _fetch_hidden_short_range_hourly():
     try:
         r = requests.get(
             "https://api.open-meteo.com/v1/forecast",
@@ -161,6 +170,7 @@ def _fetch_short_range_hourly():
                     "temp_f": float(temp[i] or 0.0),
                     "qpf_in": float(qpf[i] or 0.0),
                     "pop": float(pop[i] or 0.0),
+                    "icon_txt": "",
                 })
             except Exception:
                 continue
@@ -170,11 +180,7 @@ def _fetch_short_range_hourly():
 
 
 @st.cache_data(ttl=1800)
-def _fetch_official_daily():
-    """
-    Hidden daily forecast feed.
-    Returns day-level records for ~7 days.
-    """
+def _fetch_hidden_daily_forecast():
     try:
         hdrs = {"User-Agent": "NOAH-FloodWarning/1.0"}
         pts = requests.get(
@@ -249,15 +255,10 @@ def _fetch_official_daily():
 
 
 def _build_unified_daily_forecast():
-    """
-    Public-facing forecast object.
-    Internal source switching is hidden.
-    """
     now_et = datetime.now(ET_TZ)
-    hourly = _fetch_short_range_hourly()
-    daily  = _fetch_official_daily()
+    hourly = _fetch_hidden_short_range_hourly()
+    daily  = _fetch_hidden_daily_forecast()
 
-    # Convert hourly -> daily candidates for the first 2 days
     hourly_by_day = defaultdict(list)
     for r in hourly:
         lead = _hours_ahead(r["time"], now_et)
@@ -289,7 +290,6 @@ def _build_unified_daily_forecast():
         short_rec = short_daily.get(dkey)
         daily_rec = daily_map.get(dkey)
 
-        # Blend around first 1–2 days, then use longer-range daily
         if 12 <= lead <= 18 and short_rec and daily_rec:
             wb = (lead - 12) / 6.0
             wa = 1.0 - wb
@@ -298,7 +298,6 @@ def _build_unified_daily_forecast():
                 "date": dkey,
                 "short_name": target.strftime("%a").upper(),
                 "date_label": target.strftime("%m/%d"),
-                "icon_txt": daily_rec.get("icon_txt", ""),
             })
             unified.append(merged)
         elif _choose_bucket(lead) == "short_range" and short_rec:
@@ -313,6 +312,8 @@ def _build_unified_daily_forecast():
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  4. DATA ACQUISITION
+#     AWN is primary for current rainfall if available.
+#     Backup path is automatic and hidden.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=300)
@@ -354,8 +355,66 @@ def fetch_current_conditions():
         }
 
 
+@st.cache_data(ttl=300)
+def fetch_awn_current():
+    """
+    Optional AWN current rainfall feed.
+    Expected JSON fields if you wire it later:
+      {
+        "rain_rate_in_hr": 0.12,
+        "rain_1h_in": 0.08,
+        "rain_24h_in": 0.52,
+        "last_updated": "2026-03-11T16:20:00"
+      }
+    """
+    if not AWN_ENABLED or not AWN_CURRENT_URL:
+        return {"ok": False}
+
+    try:
+        r = requests.get(AWN_CURRENT_URL, timeout=AWN_TIMEOUT_SEC).json()
+        return {
+            "ok": True,
+            "rain_rate_in_hr": float(r.get("rain_rate_in_hr", 0.0)),
+            "rain_1h_in": float(r.get("rain_1h_in", 0.0)),
+            "rain_24h_in": float(r.get("rain_24h_in", 0.0)),
+            "last_updated": str(r.get("last_updated", "")),
+        }
+    except Exception:
+        return {"ok": False}
+
+
+@st.cache_data(ttl=900)
+def fetch_awn_history():
+    """
+    Optional AWN rolling rainfall history.
+    Expected JSON fields if you wire it later:
+      {
+        "rain_24h_in": 0.52,
+        "rain_3d_in": 1.14,
+        "rain_5d_in": 1.42,
+        "rain_7d_in": 1.88,
+        "rain_14d_in": 3.20
+      }
+    """
+    if not AWN_ENABLED or not AWN_HISTORY_URL:
+        return {"ok": False}
+
+    try:
+        r = requests.get(AWN_HISTORY_URL, timeout=AWN_TIMEOUT_SEC).json()
+        return {
+            "ok": True,
+            "rain_24h_in": float(r.get("rain_24h_in", 0.0)),
+            "rain_3d_in": float(r.get("rain_3d_in", 0.0)),
+            "rain_5d_in": float(r.get("rain_5d_in", 0.0)),
+            "rain_7d_in": float(r.get("rain_7d_in", 0.0)),
+            "rain_14d_in": float(r.get("rain_14d_in", 0.0)),
+        }
+    except Exception:
+        return {"ok": False}
+
+
 @st.cache_data(ttl=1800)
-def fetch_precip_history():
+def fetch_backup_precip_history():
     try:
         r = requests.get(
             "https://api.open-meteo.com/v1/forecast",
@@ -397,9 +456,23 @@ def fetch_precip_history():
             if age <= 1:
                 t24h += p
 
-        return round(t14d, 2), round(t7d, 2), round(snow7d, 2), round(t24h, 2), round(t5d, 2), True
+        return {
+            "ok": True,
+            "rain_14d_in": round(t14d, 2),
+            "rain_7d_in": round(t7d, 2),
+            "rain_5d_in": round(t5d, 2),
+            "rain_24h_in": round(t24h, 2),
+            "snow_7d_in": round(snow7d, 2),
+        }
     except Exception:
-        return 2.10, 0.50, 0.00, 0.00, 0.50, False
+        return {
+            "ok": False,
+            "rain_14d_in": 2.10,
+            "rain_7d_in": 0.50,
+            "rain_5d_in": 0.50,
+            "rain_24h_in": 0.00,
+            "snow_7d_in": 0.00,
+        }
 
 
 @st.cache_data(ttl=3600)
@@ -537,15 +610,7 @@ def calc_soil_saturation_ensemble(sm_07, sm_728, sm_ok, rain_5d, usdm_level):
 
     color = "#FF3333" if sat_pct > 85 else "#FF8800" if sat_pct > 70 else "#FFD700" if sat_pct > 50 else "#00FF9C"
 
-    sources = {
-        "era5_pct": round(era5_use, 1) if era5_pct is not None else None,
-        "api_pct":  api_pct,
-        "usdm_pct": usdm_pct,
-        "w_era5":   round(w_era5, 2),
-        "w_api":    round(w_api, 2),
-        "w_usdm":   round(w_usdm, 2),
-    }
-    return sat_pct, stored_in, color, sources
+    return sat_pct, stored_in, color
 
 
 def _tr55_unit_peak(tc_hrs: float, ia_p: float) -> float:
@@ -649,8 +714,8 @@ def flow_status(q, bankfull_q):
     return "FLOOD", "#FF3333"
 
 
-def nws_icon(txt):
-    t = txt.lower()
+def forecast_icon(txt):
+    t = str(txt).lower()
     if any(x in t for x in ["thunder", "storm"]):
         return "TSTM"
     if any(x in t for x in ["snow", "blizzard"]):
@@ -678,7 +743,7 @@ def nws_icon(txt):
 #  6. UI COMPONENT BUILDERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def make_dial(v, t, min_v, max_v, u, c, sub="", src=""):
+def make_dial(v, t, min_v, max_v, u, c, sub=""):
     parts = [f"<b>{t}</b>"]
     if sub:
         parts.append(f"<span style='font-size:11px;color:#7AACCC'>{sub}</span>")
@@ -701,8 +766,8 @@ def make_dial(v, t, min_v, max_v, u, c, sub="", src=""):
     return fig
 
 
-def make_stream_gauge(gid, v, title, min_v, max_v, unit, ranges, needle_clr,
-                      status_lbl, status_clr, sub_line, src_line):
+def make_stream_gauge(gid, v, min_v, max_v, unit, ranges, needle_clr,
+                      status_lbl, status_clr, sub_line):
     t_js = json.dumps(
         [{"r0": x["range"][0], "r1": x["range"][1], "color": x["color"]} for x in ranges]
     )
@@ -747,13 +812,31 @@ font-family:'Rajdhani',sans-serif;color:white;">
 #  7. DATA EXECUTION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-noaa                                              = fetch_current_conditions()
-forecast                                          = _build_unified_daily_forecast()
-rain_14d, rain_7d, snow_7d, rain_24h, rain_5d, _ = fetch_precip_history()
-sm_07, sm_728, sm_ts, sm_ok                       = fetch_era5_soil_moisture()
-usdm_level, usdm_label, usdm_date                 = fetch_usdm_drought()
+current_conditions = fetch_current_conditions()
+forecast = _build_unified_daily_forecast()
 
-soil_sat, soil_stored, soil_color, sm_sources = calc_soil_saturation_ensemble(
+awn_current = fetch_awn_current()
+awn_history = fetch_awn_history()
+backup_hist = fetch_backup_precip_history()
+
+# Rainfall forcing logic:
+#   AWN = primary observed rainfall if available
+#   backup = automatic hidden fallback
+if awn_history.get("ok", False):
+    rain_24h = round(awn_history["rain_24h_in"], 2)
+    rain_5d  = round(awn_history["rain_5d_in"], 2)
+    rain_7d  = round(awn_history["rain_7d_in"], 2)
+    rain_14d = round(awn_history["rain_14d_in"], 2)
+else:
+    rain_24h = backup_hist["rain_24h_in"]
+    rain_5d  = backup_hist["rain_5d_in"]
+    rain_7d  = backup_hist["rain_7d_in"]
+    rain_14d = backup_hist["rain_14d_in"]
+
+sm_07, sm_728, sm_ts, sm_ok       = fetch_era5_soil_moisture()
+usdm_level, usdm_label, usdm_date = fetch_usdm_drought()
+
+soil_sat, soil_stored, soil_color = calc_soil_saturation_ensemble(
     sm_07, sm_728, sm_ok, rain_5d, usdm_level
 )
 
@@ -776,6 +859,9 @@ soil_color_lo = _sat_color(soil_sat_lo)
 soil_color_up = _sat_color(soil_sat_up)
 soil_stored_lo = soil_stored
 soil_stored_up = _sat_stored(soil_sat_up)
+
+# Display current rain from AWN if available, otherwise hidden backup current precip
+display_rain_now = awn_current["rain_rate_in_hr"] if awn_current.get("ok", False) else current_conditions["precip"]
 
 qpf_24h = forecast[0]["qpf_in"] if forecast else 0.0
 pop_24h = forecast[0]["pop"] if forecast else 0.0
@@ -880,11 +966,11 @@ st.markdown(f"""
 st.markdown('<div class="panel"><div class="panel-title">ATMOSPHERIC CONDITIONS</div>', unsafe_allow_html=True)
 c1, c2, c3 = st.columns(3)
 with c1:
-    st.plotly_chart(make_dial(noaa["wind"], "WIND SPEED", 0, 50, " mph", "#5AC8FA"), use_container_width=True)
+    st.plotly_chart(make_dial(current_conditions["wind"], "WIND SPEED", 0, 50, " mph", "#5AC8FA"), use_container_width=True)
 with c2:
-    st.plotly_chart(make_dial(noaa["temp"], "TEMPERATURE", 0, 110, " F", "#FF3333"), use_container_width=True)
+    st.plotly_chart(make_dial(current_conditions["temp"], "TEMPERATURE", 0, 110, " F", "#FF3333"), use_container_width=True)
 with c3:
-    st.plotly_chart(make_dial(rain_24h, "RAIN (24H)", 0, 10, '"', "#0077FF", sub="24-Hour Accumulation"), use_container_width=True)
+    st.plotly_chart(make_dial(display_rain_now, "RAIN NOW", 0, 4, '" / hr', "#0077FF", sub="Current intensity"), use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 
@@ -905,26 +991,24 @@ u1, u2, u3 = st.columns([2, 2, 3])
 with u1:
     st.components.v1.html(make_stream_gauge(
         "g_up_depth", st.session_state.up_depth,
-        "STREAM DEPTH", 0.0, _up_max, " ft",
+        0.0, _up_max, " ft",
         [{"range": [0.0, _up_bkf * 0.60], "color": "rgba(0,255,156,0.15)"},
          {"range": [_up_bkf * 0.60, _up_bkf * 0.95], "color": "rgba(255,215,0,0.20)"},
          {"range": [_up_bkf * 0.95, _up_max], "color": "rgba(255,51,51,0.25)"}],
         up_depth_clr, up_depth_lbl, up_depth_clr,
-        f"Stage: {st.session_state.up_depth:.2f} ft",
-        ""
+        f"Stage: {st.session_state.up_depth:.2f} ft"
     ), height=240)
 
 with u2:
     _up_q_max = UP_BANKFULL_Q * 3.0
     st.components.v1.html(make_stream_gauge(
         "g_up_flow", st.session_state.up_flow,
-        "DISCHARGE", 0.0, _up_q_max, " cfs",
+        0.0, _up_q_max, " cfs",
         [{"range": [0.0, UP_BANKFULL_Q * 0.45], "color": "rgba(0,255,156,0.15)"},
          {"range": [UP_BANKFULL_Q * 0.45, UP_BANKFULL_Q * 0.95], "color": "rgba(255,215,0,0.20)"},
          {"range": [UP_BANKFULL_Q * 0.95, _up_q_max], "color": "rgba(255,51,51,0.25)"}],
         up_flow_clr, up_flow_lbl, up_flow_clr,
-        f"Q: {st.session_state.up_flow:.1f} cfs",
-        ""
+        f"Q: {st.session_state.up_flow:.1f} cfs"
     ), height=240)
 
 with u3:
@@ -963,26 +1047,24 @@ l1, l2, l3 = st.columns([2, 2, 3])
 with l1:
     st.components.v1.html(make_stream_gauge(
         "g_lo_depth", st.session_state.lo_depth,
-        "STREAM DEPTH", 0.0, _lo_max, " ft",
+        0.0, _lo_max, " ft",
         [{"range": [0.0, _lo_bkf * 0.60], "color": "rgba(0,255,156,0.15)"},
          {"range": [_lo_bkf * 0.60, _lo_bkf * 0.95], "color": "rgba(255,215,0,0.20)"},
          {"range": [_lo_bkf * 0.95, _lo_max], "color": "rgba(255,51,51,0.25)"}],
         lo_depth_clr, lo_depth_lbl, lo_depth_clr,
-        f"Stage: {st.session_state.lo_depth:.2f} ft",
-        ""
+        f"Stage: {st.session_state.lo_depth:.2f} ft"
     ), height=240)
 
 with l2:
     _lo_q_max = LO_BANKFULL_Q * 3.0
     st.components.v1.html(make_stream_gauge(
         "g_lo_flow", st.session_state.lo_flow,
-        "DISCHARGE", 0.0, _lo_q_max, " cfs",
+        0.0, _lo_q_max, " cfs",
         [{"range": [0.0, LO_BANKFULL_Q * 0.45], "color": "rgba(0,255,156,0.15)"},
          {"range": [LO_BANKFULL_Q * 0.45, LO_BANKFULL_Q * 0.95], "color": "rgba(255,215,0,0.20)"},
          {"range": [LO_BANKFULL_Q * 0.95, _lo_q_max], "color": "rgba(255,51,51,0.25)"}],
         lo_flow_clr, lo_flow_lbl, lo_flow_clr,
-        f"Q: {st.session_state.lo_flow:.1f} cfs",
-        ""
+        f"Q: {st.session_state.lo_flow:.1f} cfs"
     ), height=240)
 
 with l3:
@@ -1087,7 +1169,7 @@ else:
                 + '; border-radius:8px; padding:12px 8px; text-align:center;">'
                 + '<div style="font-weight:700; font-size:1.1em;">' + d["short_name"] + '</div>'
                 + '<div style="font-size:0.75em; color:#5A7090; margin-bottom:4px;">' + d["date_label"] + '</div>'
-                + '<div style="font-family:\'Share Tech Mono\',monospace; font-size:0.75em; color:#7AACCC; margin-bottom:4px;">' + nws_icon(d.get("icon_txt", "")) + '</div>'
+                + '<div style="font-family:\'Share Tech Mono\',monospace; font-size:0.75em; color:#7AACCC; margin-bottom:4px;">' + forecast_icon(d.get("icon_txt", "")) + '</div>'
                 + '<div style="color:' + color + '; font-size:1.55em; font-weight:700; margin:5px 0;">' + f'{risk:.1f}' + '%</div>'
                 + '<div style="color:' + color + '; font-family:\'Share Tech Mono\',monospace; font-size:0.72em; letter-spacing:2px; margin-bottom:4px;">FLOOD RISK</div>'
                 + '<div style="color:#00FFCC; font-family:\'Share Tech Mono\',monospace; font-size:0.85em;">' + f'{d["qpf_in"]:.2f}' + '&quot;</div>'
