@@ -995,7 +995,7 @@ st.markdown(
     f'<div class="upper-panel"><div class="upper-title">'
     f'UPPER CULLOWHEE CREEK &mdash '
     f'({UP_AREA_ACRES:,} AC | {UP_DA_SQMI:.2f} mi² '
-    f'&nbsp;|&nbsp; FLOOD LEAD TIME TO WCU: ~{FLOOD_TRAVEL_MIN} MIN'
+    f'&nbsp;|&nbsp;
     f'</div>',
     unsafe_allow_html=True
 )
