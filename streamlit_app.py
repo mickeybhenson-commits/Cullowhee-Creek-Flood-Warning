@@ -1236,8 +1236,6 @@ dq_pct = round((dq / st.session_state.up_flow * 100) if st.session_state.up_flow
 comp_clr_up = up_depth_clr
 comp_clr_lo = lo_depth_clr
 
-st.plotly_chart(make_dial(travel_min, "WAVE TRAVEL", 15, 90, " min", _tw_clr, sub="UPPER → LOWER"), use_container_width=True)
-
 st.markdown(f"""
 <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; margin-bottom:8px;">
 
