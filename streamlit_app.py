@@ -1080,7 +1080,7 @@ with u3:
 st.markdown('</div>', unsafe_allow_html=True)
 
 
-# ── PANEL 4: LOWER WATERSHED — LOWER ──────────────────────────────────
+# ── PANEL 4: LOWER WATERSHED ──────────────────────────────────
 # Gauge arc ranges anchored to Ecoregion 66 bankfull stage (2.87 ft)
 _lo_bkf  = LO_BANKFULL
 _lo_max  = _lo_bkf * 2.5
@@ -1170,7 +1170,7 @@ with l3:
 st.markdown('</div>', unsafe_allow_html=True)
 
 
-# ── PANEL 4B: ECOREGION 66 REGIONAL CURVE STATUS ─────────────────────────────
+# ── PANEL 4B: ECOREGION  ─────────────────────────────
 with st.expander("▶  ECOREGION 66 BLUE RIDGE REGIONAL CURVE DERIVATION", expanded=False):
     st.markdown(f"""
 <div style="background:rgba(0,10,25,0.95); border:1px solid rgba(0,100,200,0.30);
