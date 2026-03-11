@@ -29,15 +29,10 @@ ET_TZ = ZoneInfo("America/New_York")
 UTC_TZ = ZoneInfo("UTC")
 
 # AWN CONFIG
-# Put your real AWN endpoints here later. If unavailable, the script falls back
-# automatically without showing source information in Streamlit.
 AWN_ENABLED = True
 AWN_TIMEOUT_SEC = 8
 
-# Examples:
-#   AWN_CURRENT_URL = "https://<your-awn-endpoint-for-current>.json"
-#   AWN_HISTORY_URL = "https://<your-awn-endpoint-for-history>.json"
-# For now these can stay blank and the system will use backup data.
+# Add your real AWN endpoints later
 AWN_CURRENT_URL = ""
 AWN_HISTORY_URL = ""
 
@@ -114,7 +109,6 @@ _TR55_C2       = [-0.16403, -0.11657, -0.08648, -0.09057, -0.09084, -0.09303, -0
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  3. HIDDEN FORECAST ROUTER
-#     Lead-time switching is internal only. No source/provider text is shown.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _hours_ahead(target_dt: datetime, now_dt: datetime) -> float:
@@ -312,8 +306,6 @@ def _build_unified_daily_forecast():
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  4. DATA ACQUISITION
-#     AWN is primary for current rainfall if available.
-#     Backup path is automatic and hidden.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=300)
@@ -357,16 +349,6 @@ def fetch_current_conditions():
 
 @st.cache_data(ttl=300)
 def fetch_awn_current():
-    """
-    Optional AWN current rainfall feed.
-    Expected JSON fields if you wire it later:
-      {
-        "rain_rate_in_hr": 0.12,
-        "rain_1h_in": 0.08,
-        "rain_24h_in": 0.52,
-        "last_updated": "2026-03-11T16:20:00"
-      }
-    """
     if not AWN_ENABLED or not AWN_CURRENT_URL:
         return {"ok": False}
 
@@ -385,17 +367,6 @@ def fetch_awn_current():
 
 @st.cache_data(ttl=900)
 def fetch_awn_history():
-    """
-    Optional AWN rolling rainfall history.
-    Expected JSON fields if you wire it later:
-      {
-        "rain_24h_in": 0.52,
-        "rain_3d_in": 1.14,
-        "rain_5d_in": 1.42,
-        "rain_7d_in": 1.88,
-        "rain_14d_in": 3.20
-      }
-    """
     if not AWN_ENABLED or not AWN_HISTORY_URL:
         return {"ok": False}
 
@@ -819,9 +790,6 @@ awn_current = fetch_awn_current()
 awn_history = fetch_awn_history()
 backup_hist = fetch_backup_precip_history()
 
-# Rainfall forcing logic:
-#   AWN = primary observed rainfall if available
-#   backup = automatic hidden fallback
 if awn_history.get("ok", False):
     rain_24h = round(awn_history["rain_24h_in"], 2)
     rain_5d  = round(awn_history["rain_5d_in"], 2)
@@ -860,7 +828,6 @@ soil_color_up = _sat_color(soil_sat_up)
 soil_stored_lo = soil_stored
 soil_stored_up = _sat_stored(soil_sat_up)
 
-# Display current rain from AWN if available, otherwise hidden backup current precip
 display_rain_now = awn_current["rain_rate_in_hr"] if awn_current.get("ok", False) else current_conditions["precip"]
 
 qpf_24h = forecast[0]["qpf_in"] if forecast else 0.0
@@ -1036,8 +1003,7 @@ _lo_max = _lo_bkf * 2.5
 
 st.markdown(
     f'<div class="lower-panel"><div class="lower-title">'
-    f'LOWER CULLOWHEE CREEK &mdash; FULL WATERSHED OUTLET AT NCCAT '
-    f'({LO_AREA_ACRES:,} AC | {LO_DA_SQMI:.2f} mi² | CN={LO_CN_II} | Tc={LO_TC_HRS}h)'
+    f'LOWER CULLOWHEE CREEK ({LO_AREA_ACRES:,} AC | {LO_DA_SQMI:.2f} mi²)'
     f'</div>',
     unsafe_allow_html=True
 )
