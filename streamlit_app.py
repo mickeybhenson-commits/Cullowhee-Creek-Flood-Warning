@@ -970,13 +970,13 @@ st.markdown(f"""
   <div style="font-family:'Share Tech Mono',monospace; font-size:0.68em;
               color:#3A6A8A; margin-top:10px; letter-spacing:1px;">
     EVALUATED FACTORS: Soil Saturation &middot; 24hr Rainfall Forecast &middot; Probability of Precipitation
-    &nbsp;|&nbsp; BANKFULL REF: Ecoregion 66 Blue Ridge Composite (Henson et al. 2014 / SCDNR 2020)
+    &nbsp;|&nbsp; 
   </div>
 </div>""", unsafe_allow_html=True)
 
 
 # ── PANEL 2: ATMOSPHERIC CONDITIONS ──────────────────────────────────────────
-st.markdown('<div class="panel"><div class="panel-title">ATMOSPHERIC CONDITIONS &mdash; OPEN-METEO HRRR / ECMWF ERA5-LAND</div>', unsafe_allow_html=True)
+st.markdown('<div class="panel"><div class="panel-title">ATMOSPHERIC CONDITIONS &mdash;', unsafe_allow_html=True)
 c1, c2, c3, c4, c5 = st.columns(5)
 with c1: st.plotly_chart(make_dial(noaa["wind"],  "WIND SPEED",     0,  50, " mph", "#5AC8FA", src="OPEN-METEO"), use_container_width=True)
 with c2: st.plotly_chart(make_dial(travel_min, "WAVE TRAVEL", 15, 90, " min", _tw_clr, sub="UPPER → LOWER", src="KINEMATIC WAVE MODEL"), use_container_width=True)
