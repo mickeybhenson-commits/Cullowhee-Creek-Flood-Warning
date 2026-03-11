@@ -1047,39 +1047,7 @@ with u3:
   <div style="font-size:0.7em; color:#5AACD0; text-align:center; margin-bottom:8px;">
     stored: {soil_stored_up:.2f}&quot; &nbsp;|&nbsp; pore capacity
   </div>
-  <div style="font-size:0.63em; color:#3A7050; text-align:center; margin-bottom:10px;
-              font-style:italic;">
-    watershed avg {soil_sat_lo:.1f}% &times; drain factor {_UP_DRAIN_FACTOR:.3f}
-  </div>
-  <div style="display:grid; grid-template-columns:auto 1fr auto; gap:3px 8px;
-              font-size:0.68em; align-items:center;">
-    <span style="color:#3A8050;">{_era5_active}</span>
-    <span style="color:#7AACCC;">ERA5-Land &nbsp;<span style="color:#2A6050;font-size:0.85em;">w={sm_sources['w_era5']:.0%}</span></span>
-    <span style="color:#AACCDD;">{_era5_str}</span>
-    <span style="color:#3A8050;">&#x2713;</span>
-    <span style="color:#7AACCC;">API/HRRR 5-day &nbsp;<span style="color:#2A6050;font-size:0.85em;">w={sm_sources['w_api']:.0%}</span></span>
-    <span style="color:#AACCDD;">{_api_str}</span>
-    <span style="color:#3A8050;">{_usdm_active}</span>
-    <span style="color:#7AACCC;">USDM &nbsp;<span style="color:#2A6050;font-size:0.85em;">w={sm_sources['w_usdm']:.0%}</span></span>
-    <span style="color:#AACCDD;">{_usdm_str}</span>
-  </div>
-  <div style="margin-top:10px; padding-top:7px; border-top:1px solid rgba(0,120,80,0.25);
-              font-size:0.65em; color:{_usdm_clr}; letter-spacing:1px;">
-    USDM: {_usdm_tag}
-  </div>
-  <div style="font-size:0.60em; color:#2A5040; margin-top:3px;">
-    Jackson Co. NC (FIPS 37099) &nbsp;|&nbsp; {usdm_date if usdm_date != "---" else "no date"}
-  </div>
-  <div style="font-size:0.60em; color:#2A5040; margin-top:1px;">
-    ERA5 valid: {sm_ts_str}
-  </div>
-  <div style="margin-top:10px; padding-top:7px; border-top:1px solid rgba(0,120,80,0.25);
-              font-size:0.62em; color:#1E6040; letter-spacing:1px; line-height:1.5;">
-    E66 BANKFULL: {UP_BANKFULL_Q:.0f} cfs &nbsp;|&nbsp; stage {UP_BANKFULL:.2f} ft
-    &nbsp;|&nbsp; W={UP_WIDTH_FT:.0f} ft &nbsp;|&nbsp; A={UP_RATING_A:.1f}&middot;D^{UP_RATING_B}
-    <br>DA={UP_DA_SQMI:.2f} mi² &nbsp;|&nbsp; Henson 2014 / SCDNR E66 2020
-  </div>
-</div>
+
 """, unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
