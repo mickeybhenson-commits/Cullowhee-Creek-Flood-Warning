@@ -993,8 +993,8 @@ _up_max  = _up_bkf * 2.5
 
 st.markdown(
     f'<div class="upper-panel"><div class="upper-title">'
-    f'UPPER CULLOWHEE CREEK &mdash '
-    f'({UP_AREA_ACRES:,} AC | {UP_DA_SQMI:.2f} mi² '
+    f'UPPER CULLOWHEE CREEK '
+    f'({UP_AREA_ACRES:,} AC | {UP_DA_SQMI:.2f} mi²) '
   
     f'</div>',
     unsafe_allow_html=True
