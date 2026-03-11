@@ -976,13 +976,13 @@ st.markdown(f"""
 
 
 # ── PANEL 2: ATMOSPHERIC CONDITIONS ──────────────────────────────────────────
-st.markdown('<div class="panel"><div class="panel-title">ATMOSPHERIC CONDITIONS &mdash;', unsafe_allow_html=True)
+st.markdown('<div class="panel"><div class="panel-title">ATMOSPHERIC CONDITIONS;', unsafe_allow_html=True)
 c1, c2, c3, c4, c5 = st.columns(5)
-with c1: st.plotly_chart(make_dial(noaa["wind"],  "WIND SPEED",     0,  50, " mph", "#5AC8FA", src="OPEN-METEO"), use_container_width=True)
-with c2: st.plotly_chart(make_dial(travel_min, "WAVE TRAVEL", 15, 90, " min", _tw_clr, sub="UPPER → LOWER", src="KINEMATIC WAVE MODEL"), use_container_width=True)
-with c3: st.plotly_chart(make_dial(noaa["temp"],  "TEMPERATURE",    0, 110, " F",   "#FF3333", src="OPEN-METEO"), use_container_width=True)
-with c4: st.plotly_chart(make_dial(rain_24h, "RAIN (24H)", 0, 10, '"', "#0077FF", sub="24-Hour Accumulation", src="HRRR BEST MATCH"), use_container_width=True)
-with c5: st.plotly_chart(make_dial(soil_sat, "SOIL SATURATION", 0, 100, "%", "#0077FF", sub=f'{soil_stored:.2f}" Stored | ERA5-Land', src="ECMWF ERA5-LAND"), use_container_width=True)
+with c1: st.plotly_chart(make_dial(noaa["wind"],  "WIND SPEED",     0,  50, " mph", "#5AC8FA"), use_container_width=True)
+with c2: st.plotly_chart(make_dial(travel_min, "WAVE TRAVEL", 15, 90, " min", _tw_clr, sub="UPPER → LOWER"), use_container_width=True)
+with c3: st.plotly_chart(make_dial(noaa["temp"],  "TEMPERATURE",    0, 110, " F",   "#FF3333"), use_container_width=True)
+with c4: st.plotly_chart(make_dial(rain_24h, "RAIN (24H)", 0, 10, '"', "#0077FF", sub="24-Hour Accumulation"), use_container_width=True)
+with c5: st.plotly_chart(make_dial(soil_sat, "SOIL SATURATION", 0, 100, "%", "#0077FF", sub=f'{soil_stored:.2f}" Stored | ERA5-Land'), use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 
