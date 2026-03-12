@@ -620,53 +620,113 @@ def fetch_active_alerts():
         return []
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=900)
 def fetch_hazardous_weather_outlook():
+    """
+    Pulls the latest Hazardous Weather Outlook from the NWS Products API
+    (api.weather.gov) for the GSP (Greenville-Spartanburg) WFO.
+    Returns a dict with 'title', 'issued', and 'paragraphs' (list of str),
+    or None if unavailable / no active HWO.
+    """
+    import re
     try:
-        url = (
-            "https://forecast.weather.gov/showsigwx.php"
-            "?warnzone=NCZ059&warncounty=NCC099&firewxzone=NCZ059"
-            "&local_place1=Cullowhee%20NC"
-            "&product1=Hazardous+Weather+Outlook"
-            f"&lat={LAT}&lon={LON}"
-        )
-        r = requests.get(url, timeout=10)
-        txt = r.text
+        hdrs = {"User-Agent": "NOAH-FloodWarning/1.0 (WCU NEMO Project)"}
 
-        if "Hazardous Weather Outlook" not in txt and "HAZARDOUS WEATHER OUTLOOK" not in txt:
+        # Step 1 — list recent HWO products from GSP
+        index = requests.get(
+            "https://api.weather.gov/products/types/HWO/locations/GSP",
+            headers=hdrs,
+            timeout=10,
+        ).json()
+
+        graph = index.get("@graph", [])
+        if not graph:
             return None
 
-        body = txt.replace("\r", "\n")
-        for token in [
-            "<br>", "<br/>", "<br />", "</p>", "<p>", "</div>", "<div>",
-            "&nbsp;", "&#39;", "&amp;", "&quot;"
-        ]:
-            repl = "\n" if "br" in token or token in ["</p>", "<p>", "</div>", "<div>"] else " "
-            body = body.replace(token, repl)
+        # Step 2 — fetch the most recent product text
+        latest_id = graph[0].get("id", "")
+        if not latest_id:
+            return None
 
-        import re
-        body = re.sub(r"<[^>]+>", " ", body)
-        body = re.sub(r"\s+", " ", body).strip()
+        prod = requests.get(
+            f"https://api.weather.gov/products/{latest_id}",
+            headers=hdrs,
+            timeout=10,
+        ).json()
 
-        lower = body.lower()
-        idx = lower.find("hazardous weather outlook")
-        if idx >= 0:
-            body = body[idx:]
+        raw = prod.get("productText", "")
+        if not raw:
+            return None
 
-        snippet = body
-        stop_markers = ["spotter information statement", "additional information", "$$"]
-        lower_snip = snippet.lower()
-        cut = len(snippet)
-        for marker in stop_markers:
-            j = lower_snip.find(marker)
-            if j > 0:
-                cut = min(cut, j)
-        snippet = snippet[:cut].strip()
+        issued_raw = prod.get("issuanceTime", "")
+        issued_str = ""
+        if issued_raw:
+            try:
+                dt = datetime.fromisoformat(
+                    issued_raw.replace("Z", "+00:00")
+                ).astimezone(ET_TZ)
+                issued_str = dt.strftime("%b %d, %Y  %I:%M %p ET")
+            except Exception:
+                issued_str = issued_raw[:16]
 
-        if len(snippet) > 500:
-            snippet = snippet[:497] + "..."
+        # Step 3 — strip WMO header lines (everything before the first blank
+        #           line after the product identifier block)
+        lines = raw.replace("\r\n", "\n").split("\n")
+        body_lines = []
+        past_header = False
+        for line in lines:
+            stripped = line.strip()
+            # The HWO body starts after the first section header (.DAY ONE etc.)
+            # or after the "HAZARDOUS WEATHER OUTLOOK" title line
+            if not past_header:
+                if re.match(r"^\.(DAY|DAYS|THIS|SPOTTER)", stripped, re.IGNORECASE):
+                    past_header = True
+                elif "HAZARDOUS WEATHER OUTLOOK" in stripped.upper() and len(body_lines) == 0:
+                    past_header = True
+                    continue   # skip the title line; we render it ourselves
+            if past_header:
+                body_lines.append(line)
 
-        return snippet if snippet else None
+        body = "\n".join(body_lines)
+
+        # Step 4 — cut at spotter statement / $$
+        stop_pat = re.compile(
+            r"(\.SPOTTER INFORMATION STATEMENT|^\$\$)", re.IGNORECASE | re.MULTILINE
+        )
+        m = stop_pat.search(body)
+        if m:
+            body = body[: m.start()]
+
+        # Step 5 — split into readable paragraphs on section markers (.DAY, .THIS, etc.)
+        sections = re.split(r"(?m)^(\.[A-Z][A-Z\s]+\.\.\.)", body)
+        paragraphs = []
+        i = 0
+        while i < len(sections):
+            chunk = sections[i].strip()
+            if re.match(r"^\.[A-Z]", chunk):
+                # This is a section header — combine with next block
+                header = chunk
+                content = sections[i + 1].strip() if i + 1 < len(sections) else ""
+                i += 2
+                if content:
+                    paragraphs.append({"header": header, "body": content})
+            else:
+                if chunk:
+                    paragraphs.append({"header": None, "body": chunk})
+                i += 1
+
+        if not paragraphs:
+            # Fallback: return as single block
+            fallback = body.strip()
+            if not fallback:
+                return None
+            paragraphs = [{"header": None, "body": fallback}]
+
+        return {
+            "issued": issued_str,
+            "paragraphs": paragraphs,
+        }
+
     except Exception:
         return None
 
@@ -1315,17 +1375,43 @@ if active_alerts:
     st.markdown('</div>', unsafe_allow_html=True)
 
 
-# ── PANEL 1C: WEATHER OUTLOOK ─────────────────────────────────────────────────
+# ── PANEL 1C: HAZARDOUS WEATHER OUTLOOK ──────────────────────────────────────
 if hwo_text:
+    _hwo_border = "#FF8800"
+    _hwo_bg     = "rgba(255,136,0,0.07)"
+    _hwo_clr    = "#FFB066"
+    _hwo_sub    = "#FFE0C2"
+
+    # Build inner HTML for each paragraph section
+    _para_html = ""
+    for para in hwo_text["paragraphs"]:
+        if para["header"]:
+            _para_html += f"""
+      <div style="font-family:'Share Tech Mono',monospace; font-size:0.72em;
+                  color:{_hwo_clr}; letter-spacing:2px; margin:14px 0 4px;
+                  text-transform:uppercase;">
+        {para['header']}
+      </div>"""
+        _para_html += f"""
+      <div style="font-family:'Rajdhani',sans-serif; font-size:0.95em;
+                  color:{_hwo_sub}; line-height:1.6; white-space:pre-wrap;">
+        {para['body']}
+      </div>"""
+
     st.markdown(f"""
-<div class="panel">
-  <div class="panel-title">HAZARDOUS WEATHER OUTLOOK &mdash; NWS GSP / JACKSON COUNTY, NC</div>
-  <div style="font-family:'Share Tech Mono',monospace; font-size:0.78em;
-              color:#A8C8E0; line-height:1.75; letter-spacing:0.5px;
-              border-left:4px solid rgba(0,119,255,0.40);
-              padding-left:14px; margin-top:4px;">
-    {hwo_text}
+<div style="background:{_hwo_bg}; border:2px solid {_hwo_border}; border-radius:10px;
+            padding:20px 28px; margin-bottom:16px;">
+  <div style="font-family:'Share Tech Mono',monospace; font-size:0.72em;
+              color:{_hwo_clr}; letter-spacing:4px; margin-bottom:4px;">
+    HAZARDOUS WEATHER OUTLOOK
   </div>
+  <div style="font-family:'Share Tech Mono',monospace; font-size:0.65em;
+              color:#7AACCC; letter-spacing:1px; margin-bottom:14px;
+              border-bottom:1px solid rgba(255,136,0,0.25); padding-bottom:10px;">
+    NWS GREENVILLE-SPARTANBURG (GSP) &nbsp;&middot;&nbsp; JACKSON COUNTY, NC
+    &nbsp;&middot;&nbsp; ISSUED: {hwo_text['issued']}
+  </div>
+  {_para_html}
 </div>
 """, unsafe_allow_html=True)
 
