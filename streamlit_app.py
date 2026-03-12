@@ -1,6 +1,7 @@
 """
 NOAH: Cullowhee Creek Flood Warning Dashboard
-Nautilius Technologies, Franklin, NC
+Western Carolina University — NEMO River Energy Initiative
+Jackson County, NC — Watershed Monitoring System
 """
 
 import math
@@ -1493,14 +1494,24 @@ if hwo_text:
 
 
 # ── PANEL 2: ATMOSPHERIC CONDITIONS ──────────────────────────────────────────
+# 7-day rainfall color: green → yellow → orange → red keyed to SCS AMC thresholds
+_r7_clr = ("#FF3333" if rain_7d > 5.0 else
+           "#FF8800" if rain_7d > 3.0 else
+           "#FFD700" if rain_7d > 1.5 else "#00FF9C")
+
+# Source label: station data if live, otherwise HRRR best match fallback
+_r7_src = f"{station_rain['count']} PWS + HRRR" if station_rain.get("ok") else "HRRR BEST MATCH"
+
 st.markdown('<div class="panel"><div class="panel-title">ATMOSPHERIC CONDITIONS</div>', unsafe_allow_html=True)
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 with c1:
     st.plotly_chart(make_dial(current_conditions["wind"], "WIND SPEED", 0, 50, " mph", "#5AC8FA"), use_container_width=True)
 with c2:
     st.plotly_chart(make_dial(current_conditions["temp"], "TEMPERATURE", 0, 110, " F", "#FF3333"), use_container_width=True)
 with c3:
     st.plotly_chart(make_dial(display_rain_now, "RAIN NOW", 0, 4, '" / hr', "#0077FF", sub="Current intensity"), use_container_width=True)
+with c4:
+    st.plotly_chart(make_dial(rain_7d, "RAIN (7-DAY)", 0, 10, '"', _r7_clr, sub=_r7_src), use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 
