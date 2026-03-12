@@ -624,11 +624,13 @@ def fetch_active_alerts():
 def fetch_hazardous_weather_outlook():
     """
     Pulls the latest Hazardous Weather Outlook from the NWS Products API
-    (api.weather.gov) for the GSP (Greenville-Spartanburg) WFO.
-    Returns a dict with 'title', 'issued', and 'paragraphs' (list of str),
-    or None if unavailable / no active HWO.
+    for the GSP (Greenville-Spartanburg) WFO.
+    Returns dict with 'issued' (str) and 'paragraphs' (list of {header, body}),
+    or None if unavailable.
     """
     import re
+    from html import escape as html_escape
+
     try:
         hdrs = {"User-Agent": "NOAH-FloodWarning/1.0 (WCU NEMO Project)"}
 
@@ -643,7 +645,7 @@ def fetch_hazardous_weather_outlook():
         if not graph:
             return None
 
-        # Step 2 — fetch the most recent product text
+        # Step 2 — fetch most recent product
         latest_id = graph[0].get("id", "")
         if not latest_id:
             return None
@@ -658,8 +660,9 @@ def fetch_hazardous_weather_outlook():
         if not raw:
             return None
 
-        issued_raw = prod.get("issuanceTime", "")
+        # Step 3 — parse issuance time from API metadata (clean, no scraping)
         issued_str = ""
+        issued_raw = prod.get("issuanceTime", "")
         if issued_raw:
             try:
                 dt = datetime.fromisoformat(
@@ -669,61 +672,63 @@ def fetch_hazardous_weather_outlook():
             except Exception:
                 issued_str = issued_raw[:16]
 
-        # Step 3 — strip WMO header lines (everything before the first blank
-        #           line after the product identifier block)
-        lines = raw.replace("\r\n", "\n").split("\n")
-        body_lines = []
-        past_header = False
-        for line in lines:
-            stripped = line.strip()
-            # The HWO body starts after the first section header (.DAY ONE etc.)
-            # or after the "HAZARDOUS WEATHER OUTLOOK" title line
-            if not past_header:
-                if re.match(r"^\.(DAY|DAYS|THIS|SPOTTER)", stripped, re.IGNORECASE):
-                    past_header = True
-                elif "HAZARDOUS WEATHER OUTLOOK" in stripped.upper() and len(body_lines) == 0:
-                    past_header = True
-                    continue   # skip the title line; we render it ourselves
-            if past_header:
-                body_lines.append(line)
+        # Step 4 — normalise line endings
+        raw = raw.replace("\r\n", "\n").replace("\r", "\n")
 
-        body = "\n".join(body_lines)
+        # Step 5 — skip EVERYTHING before the first .DAY / .DAYS / .THIS section
+        #           marker. This discards the WMO bulletin header, AWIPS ID,
+        #           product title, NWS office line, issue time, UGC zone string,
+        #           expiration timestamp — all the preamble garbage.
+        first_section = re.search(
+            r"(?m)^\.(DAY|DAYS|THIS)\b", raw, re.IGNORECASE
+        )
+        if not first_section:
+            return None   # no recognised section structure → skip
+        body = raw[first_section.start():]
 
-        # Step 4 — cut at spotter statement / $$
+        # Step 6 — cut at spotter statement / $$
         stop_pat = re.compile(
-            r"(\.SPOTTER INFORMATION STATEMENT|^\$\$)", re.IGNORECASE | re.MULTILINE
+            r"(?m)(^\.(SPOTTER INFORMATION STATEMENT)|^\$\$)",
+            re.IGNORECASE
         )
         m = stop_pat.search(body)
         if m:
             body = body[: m.start()]
 
-        # Step 5 — split into readable paragraphs on section markers (.DAY, .THIS, etc.)
-        sections = re.split(r"(?m)^(\.[A-Z][A-Z\s]+\.\.\.)", body)
+        # Step 7 — split on section markers (.DAY ONE..., .DAYS TWO THROUGH..., etc.)
+        #           re.split with a capturing group keeps the delimiters in the list.
+        parts = re.split(r"(?m)(^\.[A-Z][A-Z0-9 ]+\.\.\.)", body)
+        # parts = [pre, header1, block1, header2, block2, ...]
+        # The first element is any text before the first header (usually empty).
+
         paragraphs = []
         i = 0
-        while i < len(sections):
-            chunk = sections[i].strip()
-            if re.match(r"^\.[A-Z]", chunk):
-                # This is a section header — combine with next block
-                header = chunk
-                content = sections[i + 1].strip() if i + 1 < len(sections) else ""
-                i += 2
-                if content:
-                    paragraphs.append({"header": header, "body": content})
-            else:
-                if chunk:
-                    paragraphs.append({"header": None, "body": chunk})
-                i += 1
+        # skip any leading non-header text
+        if parts and not re.match(r"^\.[A-Z]", parts[0].strip()):
+            i = 1
+        while i < len(parts):
+            raw_header = parts[i].strip()
+            raw_body   = parts[i + 1].strip() if i + 1 < len(parts) else ""
+            i += 2
+
+            # Clean up body: collapse runs of blank lines to one, strip leading/trailing
+            raw_body = re.sub(r"\n{3,}", "\n\n", raw_body).strip()
+
+            if not raw_body:
+                continue
+
+            # HTML-escape both header and body so special chars (<, >, &, etc.)
+            # render as text, not as HTML tags
+            paragraphs.append({
+                "header": html_escape(raw_header),
+                "body":   html_escape(raw_body),
+            })
 
         if not paragraphs:
-            # Fallback: return as single block
-            fallback = body.strip()
-            if not fallback:
-                return None
-            paragraphs = [{"header": None, "body": fallback}]
+            return None
 
         return {
-            "issued": issued_str,
+            "issued":     issued_str,
             "paragraphs": paragraphs,
         }
 
@@ -1382,31 +1387,37 @@ if hwo_text:
     _hwo_clr    = "#FFB066"
     _hwo_sub    = "#FFE0C2"
 
-    # Build inner HTML for each paragraph section
+    # Build inner HTML for each paragraph section.
+    # Body text is already HTML-escaped by the fetch function;
+    # convert newlines to <br> for proper rendering.
     _para_html = ""
     for para in hwo_text["paragraphs"]:
         if para["header"]:
-            _para_html += f"""
-      <div style="font-family:'Share Tech Mono',monospace; font-size:0.72em;
-                  color:{_hwo_clr}; letter-spacing:2px; margin:14px 0 4px;
-                  text-transform:uppercase;">
-        {para['header']}
-      </div>"""
-        _para_html += f"""
-      <div style="font-family:'Rajdhani',sans-serif; font-size:0.95em;
-                  color:{_hwo_sub}; line-height:1.6; white-space:pre-wrap;">
-        {para['body']}
-      </div>"""
+            _para_html += (
+                f'<div style="font-family:\'Share Tech Mono\',monospace; font-size:0.72em;'
+                f' color:{_hwo_clr}; letter-spacing:2px; margin:14px 0 5px;">'
+                f'{para["header"]}</div>'
+            )
+        body_html = para["body"].replace("\n\n", "<br><br>").replace("\n", " ")
+        _para_html += (
+            f'<div style="font-family:\'Rajdhani\',sans-serif; font-size:1.0em;'
+            f' color:{_hwo_sub}; line-height:1.65; margin-bottom:4px;">'
+            f'{body_html}</div>'
+        )
 
     st.markdown(f"""
 <div style="background:{_hwo_bg}; border:2px solid {_hwo_border}; border-radius:10px;
             padding:20px 28px; margin-bottom:16px;">
   <div style="font-family:'Share Tech Mono',monospace; font-size:0.72em;
-              color:{_hwo_clr}; letter-spacing:4px; margin-bottom:4px;">
+              color:{_hwo_clr}; letter-spacing:4px; margin-bottom:6px; text-align:center;">
+    NWS ACTIVE PRODUCT
+  </div>
+  <div style="font-size:3.0em; font-weight:700; color:{_hwo_clr};
+              letter-spacing:4px; line-height:1.0; text-align:center; margin-bottom:12px;">
     HAZARDOUS WEATHER OUTLOOK
   </div>
   <div style="font-family:'Share Tech Mono',monospace; font-size:0.65em;
-              color:#7AACCC; letter-spacing:1px; margin-bottom:14px;
+              color:#7AACCC; letter-spacing:1px; margin-bottom:14px; text-align:center;
               border-bottom:1px solid rgba(255,136,0,0.25); padding-bottom:10px;">
     NWS GREENVILLE-SPARTANBURG (GSP) &nbsp;&middot;&nbsp; JACKSON COUNTY, NC
     &nbsp;&middot;&nbsp; ISSUED: {hwo_text['issued']}
