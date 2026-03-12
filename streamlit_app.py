@@ -28,13 +28,48 @@ LAT, LON = 35.3079, -83.1746
 ET_TZ = ZoneInfo("America/New_York")
 UTC_TZ = ZoneInfo("UTC")
 
-# AWN CONFIG
-AWN_ENABLED = True
-AWN_TIMEOUT_SEC = 8
+# -----------------------------------------------------------------------------
+# REAL-TIME OBSERVED RAIN CONFIG
+#
+# Supported station adapter types:
+#   1) "custom_json"    -> your own relay / Blues bridge / AWN proxy
+#   2) "weathercom_pws" -> optional official PWS API if you have an API key
+#
+# No provider/source names are shown in Streamlit.
+# -----------------------------------------------------------------------------
 
-# Add your real AWN endpoints later
-AWN_CURRENT_URL = ""
-AWN_HISTORY_URL = ""
+REALTIME_RAIN_STATIONS = [
+    {
+        "name": "Primary Basin Rain",
+        "type": "custom_json",
+        "weight": 1.0,
+        "current_url": "",
+        "history_url": "",
+    },
+    {
+        "name": "Secondary Basin Rain",
+        "type": "custom_json",
+        "weight": 1.0,
+        "current_url": "",
+        "history_url": "",
+    },
+    {
+        "name": "Cullowhee PWS",
+        "type": "weathercom_pws",
+        "weight": 1.0,
+        "station_id": "KNCCULLO7",
+        "api_key": "",
+    },
+    {
+        "name": "Sylva PWS",
+        "type": "weathercom_pws",
+        "weight": 1.0,
+        "station_id": "KNCSYLVA86",
+        "api_key": "",
+    },
+]
+
+REQUEST_TIMEOUT_SEC = 10
 
 st.markdown("""
 <style>
@@ -83,7 +118,6 @@ LO_RATING_B        = 2.30
 LO_BASEFLOW        = 9.0
 LO_BANKFULL        = 2.87
 LO_BANKFULL_Q      = 241.2
-LO_WIDTH_FT        = 35.5
 
 UP_AREA_ACRES      = 2480
 UP_DA_SQMI         = 3.875
@@ -94,7 +128,6 @@ UP_RATING_B        = 2.15
 UP_BASEFLOW        = 3.5
 UP_BANKFULL        = 2.16
 UP_BANKFULL_Q      = 110.7
-UP_WIDTH_FT        = 23.3
 
 FLOOD_TRAVEL_MIN   = 65
 
@@ -347,43 +380,6 @@ def fetch_current_conditions():
         }
 
 
-@st.cache_data(ttl=300)
-def fetch_awn_current():
-    if not AWN_ENABLED or not AWN_CURRENT_URL:
-        return {"ok": False}
-
-    try:
-        r = requests.get(AWN_CURRENT_URL, timeout=AWN_TIMEOUT_SEC).json()
-        return {
-            "ok": True,
-            "rain_rate_in_hr": float(r.get("rain_rate_in_hr", 0.0)),
-            "rain_1h_in": float(r.get("rain_1h_in", 0.0)),
-            "rain_24h_in": float(r.get("rain_24h_in", 0.0)),
-            "last_updated": str(r.get("last_updated", "")),
-        }
-    except Exception:
-        return {"ok": False}
-
-
-@st.cache_data(ttl=900)
-def fetch_awn_history():
-    if not AWN_ENABLED or not AWN_HISTORY_URL:
-        return {"ok": False}
-
-    try:
-        r = requests.get(AWN_HISTORY_URL, timeout=AWN_TIMEOUT_SEC).json()
-        return {
-            "ok": True,
-            "rain_24h_in": float(r.get("rain_24h_in", 0.0)),
-            "rain_3d_in": float(r.get("rain_3d_in", 0.0)),
-            "rain_5d_in": float(r.get("rain_5d_in", 0.0)),
-            "rain_7d_in": float(r.get("rain_7d_in", 0.0)),
-            "rain_14d_in": float(r.get("rain_14d_in", 0.0)),
-        }
-    except Exception:
-        return {"ok": False}
-
-
 @st.cache_data(ttl=1800)
 def fetch_backup_precip_history():
     try:
@@ -510,6 +506,245 @@ def fetch_usdm_drought():
         return 0, "NO DROUGHT", map_date
     except Exception:
         return -1, "API UNAVAILABLE", "---"
+
+
+@st.cache_data(ttl=300)
+def fetch_active_alerts():
+    """
+    Hidden NWS alert fetch.
+    Returns active alerts affecting the dashboard point.
+    Nothing in the UI says 'NWS'.
+    """
+    try:
+        hdrs = {"User-Agent": "NOAH-FloodWarning/1.0"}
+        r = requests.get(
+            "https://api.weather.gov/alerts/active",
+            params={"point": f"{LAT},{LON}"},
+            headers=hdrs,
+            timeout=10
+        ).json()
+
+        feats = r.get("features", [])
+        alerts = []
+
+        for feat in feats:
+            props = feat.get("properties", {})
+            event = str(props.get("event", "")).strip()
+            headline = str(props.get("headline", "")).strip()
+            expires = str(props.get("expires", "")).strip()
+            desc = str(props.get("description", "")).strip()
+
+            if not event:
+                continue
+
+            short_desc = " ".join(desc.split())
+            if len(short_desc) > 180:
+                short_desc = short_desc[:177] + "..."
+
+            expires_local = ""
+            if expires:
+                try:
+                    dt = datetime.fromisoformat(expires.replace("Z", "+00:00")).astimezone(ET_TZ)
+                    expires_local = dt.strftime("%b %d, %I:%M %p")
+                except Exception:
+                    expires_local = ""
+
+            alerts.append({
+                "event": event,
+                "headline": headline,
+                "expires_local": expires_local,
+                "description": short_desc,
+            })
+
+        severity_rank = {
+            "flash flood warning": 5,
+            "flood warning": 5,
+            "severe thunderstorm warning": 4,
+            "tornado warning": 5,
+            "flash flood watch": 3,
+            "flood watch": 3,
+            "wind advisory": 2,
+            "flood advisory": 2,
+            "special weather statement": 1,
+        }
+
+        alerts.sort(key=lambda a: severity_rank.get(a["event"].lower(), 0), reverse=True)
+        return alerts
+    except Exception:
+        return []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  4B. OBSERVED RAIN ADAPTERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _clean_rain_value(x, min_v=0.0, max_v=50.0):
+    try:
+        v = float(x)
+        if math.isnan(v) or v < min_v or v > max_v:
+            return None
+        return v
+    except Exception:
+        return None
+
+
+def _fetch_custom_json_station(station_cfg: dict) -> dict:
+    current_url = station_cfg.get("current_url", "").strip()
+    history_url = station_cfg.get("history_url", "").strip()
+
+    if not current_url and not history_url:
+        return {"ok": False}
+
+    out = {"ok": False}
+
+    try:
+        if current_url:
+            rc = requests.get(current_url, timeout=REQUEST_TIMEOUT_SEC).json()
+            out["rain_rate_in_hr"] = _clean_rain_value(rc.get("rain_rate_in_hr"), 0, 15)
+            out["rain_1h_in"]      = _clean_rain_value(rc.get("rain_1h_in"), 0, 15)
+            out["rain_24h_in"]     = _clean_rain_value(rc.get("rain_24h_in"), 0, 30)
+    except Exception:
+        pass
+
+    try:
+        if history_url:
+            rh = requests.get(history_url, timeout=REQUEST_TIMEOUT_SEC).json()
+            out["rain_24h_in"] = _clean_rain_value(rh.get("rain_24h_in", out.get("rain_24h_in")), 0, 30)
+            out["rain_3d_in"]  = _clean_rain_value(rh.get("rain_3d_in"), 0, 40)
+            out["rain_5d_in"]  = _clean_rain_value(rh.get("rain_5d_in"), 0, 50)
+            out["rain_7d_in"]  = _clean_rain_value(rh.get("rain_7d_in"), 0, 60)
+            out["rain_14d_in"] = _clean_rain_value(rh.get("rain_14d_in"), 0, 80)
+    except Exception:
+        pass
+
+    out["ok"] = any(out.get(k) is not None for k in [
+        "rain_rate_in_hr", "rain_1h_in", "rain_24h_in", "rain_3d_in",
+        "rain_5d_in", "rain_7d_in", "rain_14d_in"
+    ])
+    return out
+
+
+def _fetch_weathercom_pws_station(station_cfg: dict) -> dict:
+    station_id = station_cfg.get("station_id", "").strip()
+    api_key    = station_cfg.get("api_key", "").strip()
+
+    if not station_id or not api_key:
+        return {"ok": False}
+
+    out = {"ok": False}
+
+    try:
+        current = requests.get(
+            "https://api.weather.com/v2/pws/observations/current",
+            params={
+                "stationId": station_id,
+                "format": "json",
+                "units": "e",
+                "numericPrecision": "decimal",
+                "apiKey": api_key,
+            },
+            timeout=REQUEST_TIMEOUT_SEC,
+        ).json()
+
+        obs = (current.get("observations") or [{}])[0]
+        imperial = obs.get("imperial", {})
+        out["rain_rate_in_hr"] = _clean_rain_value(imperial.get("precipRate"), 0, 15)
+        out["rain_1h_in"]      = _clean_rain_value(imperial.get("precipTotal"), 0, 15)
+        out["rain_24h_in"]     = _clean_rain_value(imperial.get("precipTotal"), 0, 30)
+    except Exception:
+        pass
+
+    try:
+        hist = requests.get(
+            "https://api.weather.com/v2/pws/observations/hourly/7day",
+            params={
+                "stationId": station_id,
+                "format": "json",
+                "units": "e",
+                "numericPrecision": "decimal",
+                "apiKey": api_key,
+            },
+            timeout=REQUEST_TIMEOUT_SEC,
+        ).json()
+
+        rows = hist.get("observations", [])
+        if rows:
+            hourly = []
+            now_et = datetime.now(ET_TZ)
+            for row in rows:
+                try:
+                    ts_utc = datetime.fromtimestamp(int(row["epoch"]), tz=UTC_TZ)
+                    ts_et = ts_utc.astimezone(ET_TZ)
+                    age_hr = (now_et - ts_et).total_seconds() / 3600.0
+                    if age_hr < 0:
+                        continue
+                    imperial = row.get("imperial", {})
+                    p = _clean_rain_value(imperial.get("precipTotal"), 0, 10)
+                    if p is None:
+                        p = 0.0
+                    hourly.append((age_hr, p))
+                except Exception:
+                    continue
+
+            rain_24h = sum(p for age, p in hourly if age <= 24)
+            rain_72h = sum(p for age, p in hourly if age <= 72)
+            rain_5d  = sum(p for age, p in hourly if age <= 120)
+            rain_7d  = sum(p for age, p in hourly if age <= 168)
+
+            out["rain_24h_in"] = _clean_rain_value(rain_24h, 0, 30)
+            out["rain_3d_in"]  = _clean_rain_value(rain_72h, 0, 40)
+            out["rain_5d_in"]  = _clean_rain_value(rain_5d, 0, 50)
+            out["rain_7d_in"]  = _clean_rain_value(rain_7d, 0, 60)
+    except Exception:
+        pass
+
+    out["ok"] = any(out.get(k) is not None for k in [
+        "rain_rate_in_hr", "rain_1h_in", "rain_24h_in", "rain_3d_in",
+        "rain_5d_in", "rain_7d_in"
+    ])
+    return out
+
+
+@st.cache_data(ttl=300)
+def fetch_realtime_station_bundle():
+    station_results = []
+
+    for cfg in REALTIME_RAIN_STATIONS:
+        stype = cfg.get("type", "").strip().lower()
+        if stype == "custom_json":
+            res = _fetch_custom_json_station(cfg)
+        elif stype == "weathercom_pws":
+            res = _fetch_weathercom_pws_station(cfg)
+        else:
+            res = {"ok": False}
+
+        if res.get("ok", False):
+            res["weight"] = float(cfg.get("weight", 1.0))
+            station_results.append(res)
+
+    if not station_results:
+        return {"ok": False, "count": 0}
+
+    def weighted_mean(key):
+        vals = [(r[key], r["weight"]) for r in station_results if r.get(key) is not None]
+        if not vals:
+            return None
+        wsum = sum(w for _, w in vals)
+        if wsum <= 0:
+            return None
+        return round(sum(v * w for v, w in vals) / wsum, 2)
+
+    return {
+        "ok": True,
+        "count": len(station_results),
+        "rain_rate_in_hr": weighted_mean("rain_rate_in_hr"),
+        "rain_1h_in": weighted_mean("rain_1h_in"),
+        "rain_24h_in": weighted_mean("rain_24h_in"),
+        "rain_3d_in": weighted_mean("rain_3d_in"),
+        "rain_5d_in": weighted_mean("rain_5d_in"),
+        "rain_7d_in": weighted_mean("rain_7d_in"),
+        "rain_14d_in": weighted_mean("rain_14d_in"),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -779,30 +1014,57 @@ font-family:'Rajdhani',sans-serif;color:white;">
 </script></body></html>"""
 
 
+def _alert_style(event_name: str):
+    e = event_name.lower()
+    if "warning" in e:
+        return {
+            "border": "#FF3333",
+            "text": "#FFCCCC",
+            "title": "#FF6666",
+            "bg": "rgba(255,51,51,0.10)",
+        }
+    if "watch" in e:
+        return {
+            "border": "#FF8800",
+            "text": "#FFE0C2",
+            "title": "#FFB066",
+            "bg": "rgba(255,136,0,0.10)",
+        }
+    return {
+        "border": "#FFD700",
+        "text": "#FFF3B0",
+        "title": "#FFE866",
+        "bg": "rgba(255,215,0,0.10)",
+    }
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  7. DATA EXECUTION
 # ═══════════════════════════════════════════════════════════════════════════════
 
 current_conditions = fetch_current_conditions()
 forecast = _build_unified_daily_forecast()
-
-awn_current = fetch_awn_current()
-awn_history = fetch_awn_history()
 backup_hist = fetch_backup_precip_history()
+station_rain = fetch_realtime_station_bundle()
+active_alerts = fetch_active_alerts()
 
-if awn_history.get("ok", False):
-    rain_24h = round(awn_history["rain_24h_in"], 2)
-    rain_5d  = round(awn_history["rain_5d_in"], 2)
-    rain_7d  = round(awn_history["rain_7d_in"], 2)
-    rain_14d = round(awn_history["rain_14d_in"], 2)
+sm_07, sm_728, sm_ts, sm_ok       = fetch_era5_soil_moisture()
+usdm_level, usdm_label, usdm_date = fetch_usdm_drought()
+
+if station_rain.get("ok", False):
+    rain_24h = station_rain.get("rain_24h_in") or backup_hist["rain_24h_in"]
+    rain_5d  = station_rain.get("rain_5d_in")  or backup_hist["rain_5d_in"]
+    rain_7d  = station_rain.get("rain_7d_in")  or backup_hist["rain_7d_in"]
+    rain_14d = station_rain.get("rain_14d_in") or backup_hist["rain_14d_in"]
+    display_rain_now = station_rain.get("rain_rate_in_hr")
+    if display_rain_now is None:
+        display_rain_now = current_conditions["precip"]
 else:
     rain_24h = backup_hist["rain_24h_in"]
     rain_5d  = backup_hist["rain_5d_in"]
     rain_7d  = backup_hist["rain_7d_in"]
     rain_14d = backup_hist["rain_14d_in"]
-
-sm_07, sm_728, sm_ts, sm_ok       = fetch_era5_soil_moisture()
-usdm_level, usdm_label, usdm_date = fetch_usdm_drought()
+    display_rain_now = current_conditions["precip"]
 
 soil_sat, soil_stored, soil_color = calc_soil_saturation_ensemble(
     sm_07, sm_728, sm_ok, rain_5d, usdm_level
@@ -827,8 +1089,6 @@ soil_color_lo = _sat_color(soil_sat_lo)
 soil_color_up = _sat_color(soil_sat_up)
 soil_stored_lo = soil_stored
 soil_stored_up = _sat_stored(soil_sat_up)
-
-display_rain_now = awn_current["rain_rate_in_hr"] if awn_current.get("ok", False) else current_conditions["precip"]
 
 qpf_24h = forecast[0]["qpf_in"] if forecast else 0.0
 pop_24h = forecast[0]["pop"] if forecast else 0.0
@@ -927,6 +1187,33 @@ st.markdown(f"""
     EVALUATED FACTORS: Soil Saturation &middot; 24hr Rainfall Forecast &middot; Probability of Precipitation
   </div>
 </div>""", unsafe_allow_html=True)
+
+
+# ── PANEL 1B: ACTIVE ALERTS ───────────────────────────────────────────────────
+if active_alerts:
+    st.markdown('<div class="panel"><div class="panel-title">ACTIVE WEATHER ALERTS</div>', unsafe_allow_html=True)
+    for a in active_alerts:
+        style = _alert_style(a["event"])
+        expires_line = f"Until {a['expires_local']}" if a["expires_local"] else ""
+        summary = a["headline"] if a["headline"] else a["description"]
+        if len(summary) > 220:
+            summary = summary[:217] + "..."
+        st.markdown(f"""
+<div style="background:{style['bg']}; border-left:6px solid {style['border']};
+            border-radius:8px; padding:14px 16px; margin-bottom:10px;">
+  <div style="font-family:'Share Tech Mono',monospace; font-size:0.78em; color:{style['title']};
+              letter-spacing:2px; margin-bottom:6px;">
+    {a['event'].upper()}
+  </div>
+  <div style="font-size:0.92em; color:{style['text']}; line-height:1.45;">
+    {summary}
+  </div>
+  <div style="font-family:'Share Tech Mono',monospace; font-size:0.66em; color:#7AACCC; margin-top:8px;">
+    {expires_line}
+  </div>
+</div>
+""", unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 # ── PANEL 2: ATMOSPHERIC CONDITIONS ──────────────────────────────────────────
