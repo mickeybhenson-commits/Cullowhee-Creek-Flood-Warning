@@ -622,10 +622,6 @@ def fetch_active_alerts():
 
 @st.cache_data(ttl=300)
 def fetch_hazardous_weather_outlook():
-    """
-    Pulls the zone products page used by the local point page and extracts
-    Hazardous Weather Outlook text if present.
-    """
     try:
         url = (
             "https://forecast.weather.gov/showsigwx.php"
@@ -640,7 +636,6 @@ def fetch_hazardous_weather_outlook():
         if "Hazardous Weather Outlook" not in txt and "HAZARDOUS WEATHER OUTLOOK" not in txt:
             return None
 
-        # very light HTML cleanup
         body = txt.replace("\r", "\n")
         for token in [
             "<br>", "<br/>", "<br />", "</p>", "<p>", "</div>", "<div>",
@@ -658,13 +653,8 @@ def fetch_hazardous_weather_outlook():
         if idx >= 0:
             body = body[idx:]
 
-        # Try to isolate the meaningful outlook portion
         snippet = body
-        stop_markers = [
-            "spotter information statement",
-            "additional information",
-            "$$",
-        ]
+        stop_markers = ["spotter information statement", "additional information", "$$"]
         lower_snip = snippet.lower()
         cut = len(snippet)
         for marker in stop_markers:
@@ -1150,28 +1140,28 @@ def _alert_style(event_name: str):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 current_conditions = fetch_current_conditions()
-forecast = _build_unified_daily_forecast()
-backup_hist = fetch_backup_precip_history()
-station_rain = fetch_realtime_station_bundle()
-active_alerts = fetch_active_alerts()
-hwo_text = fetch_hazardous_weather_outlook()
+forecast           = _build_unified_daily_forecast()
+backup_hist        = fetch_backup_precip_history()
+station_rain       = fetch_realtime_station_bundle()
+active_alerts      = fetch_active_alerts()
+hwo_text           = fetch_hazardous_weather_outlook()
 
 sm_07, sm_728, sm_ts, sm_ok       = fetch_era5_soil_moisture()
 usdm_level, usdm_label, usdm_date = fetch_usdm_drought()
 
 if station_rain.get("ok", False):
-    rain_24h = station_rain.get("rain_24h_in") or backup_hist["rain_24h_in"]
-    rain_5d  = station_rain.get("rain_5d_in")  or backup_hist["rain_5d_in"]
-    rain_7d  = station_rain.get("rain_7d_in")  or backup_hist["rain_7d_in"]
-    rain_14d = station_rain.get("rain_14d_in") or backup_hist["rain_14d_in"]
+    rain_24h         = station_rain.get("rain_24h_in") or backup_hist["rain_24h_in"]
+    rain_5d          = station_rain.get("rain_5d_in")  or backup_hist["rain_5d_in"]
+    rain_7d          = station_rain.get("rain_7d_in")  or backup_hist["rain_7d_in"]
+    rain_14d         = station_rain.get("rain_14d_in") or backup_hist["rain_14d_in"]
     display_rain_now = station_rain.get("rain_rate_in_hr")
     if display_rain_now is None:
         display_rain_now = current_conditions["precip"]
 else:
-    rain_24h = backup_hist["rain_24h_in"]
-    rain_5d  = backup_hist["rain_5d_in"]
-    rain_7d  = backup_hist["rain_7d_in"]
-    rain_14d = backup_hist["rain_14d_in"]
+    rain_24h         = backup_hist["rain_24h_in"]
+    rain_5d          = backup_hist["rain_5d_in"]
+    rain_7d          = backup_hist["rain_7d_in"]
+    rain_14d         = backup_hist["rain_14d_in"]
     display_rain_now = current_conditions["precip"]
 
 soil_sat, soil_stored, soil_color = calc_soil_saturation_ensemble(
@@ -1193,15 +1183,15 @@ def _sat_stored(s):
     return round((s / 100.0) * (SOIL_POROSITY * 11.024), 2)
 
 
-soil_color_lo = _sat_color(soil_sat_lo)
-soil_color_up = _sat_color(soil_sat_up)
+soil_color_lo  = _sat_color(soil_sat_lo)
+soil_color_up  = _sat_color(soil_sat_up)
 soil_stored_lo = soil_stored
 soil_stored_up = _sat_stored(soil_sat_up)
 
 qpf_24h = forecast[0]["qpf_in"] if forecast else 0.0
-pop_24h = forecast[0]["pop"] if forecast else 0.0
+pop_24h  = forecast[0]["pop"]    if forecast else 0.0
 
-threat = flood_threat_score(soil_sat_lo, qpf_24h, pop_24h)
+threat          = flood_threat_score(soil_sat_lo, qpf_24h, pop_24h)
 t_lbl, t_clr, t_bg = threat_meta(threat)
 
 lo_depth, lo_flow = model_stream(
@@ -1226,14 +1216,14 @@ if "up_flow" not in st.session_state:
     st.session_state.up_flow = up_flow
 
 st.session_state.lo_depth = round(st.session_state.lo_depth * 0.30 + lo_depth * 0.70, 2)
-st.session_state.lo_flow  = round(st.session_state.lo_flow * 0.30 + lo_flow * 0.70, 1)
+st.session_state.lo_flow  = round(st.session_state.lo_flow  * 0.30 + lo_flow  * 0.70, 1)
 st.session_state.up_depth = round(st.session_state.up_depth * 0.30 + up_depth * 0.70, 2)
-st.session_state.up_flow  = round(st.session_state.up_flow * 0.30 + up_flow * 0.70, 1)
+st.session_state.up_flow  = round(st.session_state.up_flow  * 0.30 + up_flow  * 0.70, 1)
 
 lo_depth_lbl, lo_depth_clr = stage_status(st.session_state.lo_depth, LO_BANKFULL)
 up_depth_lbl, up_depth_clr = stage_status(st.session_state.up_depth, UP_BANKFULL)
-lo_flow_lbl,  lo_flow_clr  = flow_status(st.session_state.lo_flow, LO_BANKFULL_Q)
-up_flow_lbl,  up_flow_clr  = flow_status(st.session_state.up_flow, UP_BANKFULL_Q)
+lo_flow_lbl,  lo_flow_clr  = flow_status(st.session_state.lo_flow,   LO_BANKFULL_Q)
+up_flow_lbl,  up_flow_clr  = flow_status(st.session_state.up_flow,   UP_BANKFULL_Q)
 
 lo_bkf_pct = round(min(100, st.session_state.lo_depth / LO_BANKFULL * 100), 1)
 up_bkf_pct = round(min(100, st.session_state.up_depth / UP_BANKFULL * 100), 1)
@@ -1255,6 +1245,7 @@ _tw_clr = ("#FF3333" if travel_min < 25 else
 
 now_et = datetime.now(ET_TZ)
 
+# ── HEADER ───────────────────────────────────────────────────────────────────
 st.markdown(f"""
 <div class="site-header">
   <div class="site-title">NOAH: CULLOWHEE CREEK FLOOD WARNING</div>
@@ -1266,7 +1257,7 @@ st.markdown(f"""
 </div>""", unsafe_allow_html=True)
 
 
-# ── PANEL 1: FLOOD THREAT BANNER ──────────────────────────────────────────────
+# ── PANEL 1: FLOOD THREAT BANNER ─────────────────────────────────────────────
 st.markdown(f"""
 <div style="background:{t_bg}; border:2px solid {t_clr}; border-radius:10px;
             padding:22px 30px; margin-bottom:16px; text-align:center;">
@@ -1297,7 +1288,7 @@ st.markdown(f"""
 </div>""", unsafe_allow_html=True)
 
 
-# ── PANEL 1B: ACTIVE WEATHER ALERTS ───────────────────────────────────────────
+# ── PANEL 1B: ACTIVE WEATHER ALERTS ──────────────────────────────────────────
 if active_alerts:
     st.markdown('<div class="panel"><div class="panel-title">ACTIVE WEATHER ALERTS</div>', unsafe_allow_html=True)
     for a in active_alerts:
@@ -1324,23 +1315,17 @@ if active_alerts:
     st.markdown('</div>', unsafe_allow_html=True)
 
 
-# ── PANEL 1C: WEATHER OUTLOOK ────────────────────────────────────────────────
+# ── PANEL 1C: WEATHER OUTLOOK ─────────────────────────────────────────────────
 if hwo_text:
-    st.markdown("""
-<div class="panel">
-  <div class="panel-title">WEATHER OUTLOOK</div>
-""", unsafe_allow_html=True)
     st.markdown(f"""
-<div style="background:rgba(0,120,220,0.10); border-left:6px solid #33A8FF;
-            border-radius:8px; padding:14px 16px; margin-bottom:6px;">
-  <div style="font-family:'Share Tech Mono',monospace; font-size:0.78em; color:#66C2FF;
-              letter-spacing:2px; margin-bottom:6px;">
-    HAZARDOUS WEATHER OUTLOOK
-  </div>
-  <div style="font-size:0.92em; color:#D8ECFF; line-height:1.45;">
+<div class="panel">
+  <div class="panel-title">HAZARDOUS WEATHER OUTLOOK &mdash; NWS GSP / JACKSON COUNTY, NC</div>
+  <div style="font-family:'Share Tech Mono',monospace; font-size:0.78em;
+              color:#A8C8E0; line-height:1.75; letter-spacing:0.5px;
+              border-left:4px solid rgba(0,119,255,0.40);
+              padding-left:14px; margin-top:4px;">
     {hwo_text}
   </div>
-</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1375,9 +1360,9 @@ with u1:
     st.components.v1.html(make_stream_gauge(
         "g_up_depth", st.session_state.up_depth,
         0.0, _up_max, " ft",
-        [{"range": [0.0, _up_bkf * 0.60], "color": "rgba(0,255,156,0.15)"},
-         {"range": [_up_bkf * 0.60, _up_bkf * 0.95], "color": "rgba(255,215,0,0.20)"},
-         {"range": [_up_bkf * 0.95, _up_max], "color": "rgba(255,51,51,0.25)"}],
+        [{"range": [0.0,          _up_bkf * 0.60], "color": "rgba(0,255,156,0.15)"},
+         {"range": [_up_bkf*0.60, _up_bkf * 0.95], "color": "rgba(255,215,0,0.20)"},
+         {"range": [_up_bkf*0.95, _up_max],         "color": "rgba(255,51,51,0.25)"}],
         up_depth_clr, up_depth_lbl, up_depth_clr,
         f"Stage: {st.session_state.up_depth:.2f} ft"
     ), height=240)
@@ -1387,9 +1372,9 @@ with u2:
     st.components.v1.html(make_stream_gauge(
         "g_up_flow", st.session_state.up_flow,
         0.0, _up_q_max, " cfs",
-        [{"range": [0.0, UP_BANKFULL_Q * 0.45], "color": "rgba(0,255,156,0.15)"},
-         {"range": [UP_BANKFULL_Q * 0.45, UP_BANKFULL_Q * 0.95], "color": "rgba(255,215,0,0.20)"},
-         {"range": [UP_BANKFULL_Q * 0.95, _up_q_max], "color": "rgba(255,51,51,0.25)"}],
+        [{"range": [0.0,               UP_BANKFULL_Q * 0.45], "color": "rgba(0,255,156,0.15)"},
+         {"range": [UP_BANKFULL_Q*0.45, UP_BANKFULL_Q * 0.95], "color": "rgba(255,215,0,0.20)"},
+         {"range": [UP_BANKFULL_Q*0.95, _up_q_max],             "color": "rgba(255,51,51,0.25)"}],
         up_flow_clr, up_flow_lbl, up_flow_clr,
         f"Q: {st.session_state.up_flow:.1f} cfs"
     ), height=240)
@@ -1430,9 +1415,9 @@ with l1:
     st.components.v1.html(make_stream_gauge(
         "g_lo_depth", st.session_state.lo_depth,
         0.0, _lo_max, " ft",
-        [{"range": [0.0, _lo_bkf * 0.60], "color": "rgba(0,255,156,0.15)"},
-         {"range": [_lo_bkf * 0.60, _lo_bkf * 0.95], "color": "rgba(255,215,0,0.20)"},
-         {"range": [_lo_bkf * 0.95, _lo_max], "color": "rgba(255,51,51,0.25)"}],
+        [{"range": [0.0,          _lo_bkf * 0.60], "color": "rgba(0,255,156,0.15)"},
+         {"range": [_lo_bkf*0.60, _lo_bkf * 0.95], "color": "rgba(255,215,0,0.20)"},
+         {"range": [_lo_bkf*0.95, _lo_max],         "color": "rgba(255,51,51,0.25)"}],
         lo_depth_clr, lo_depth_lbl, lo_depth_clr,
         f"Stage: {st.session_state.lo_depth:.2f} ft"
     ), height=240)
@@ -1442,9 +1427,9 @@ with l2:
     st.components.v1.html(make_stream_gauge(
         "g_lo_flow", st.session_state.lo_flow,
         0.0, _lo_q_max, " cfs",
-        [{"range": [0.0, LO_BANKFULL_Q * 0.45], "color": "rgba(0,255,156,0.15)"},
-         {"range": [LO_BANKFULL_Q * 0.45, LO_BANKFULL_Q * 0.95], "color": "rgba(255,215,0,0.20)"},
-         {"range": [LO_BANKFULL_Q * 0.95, _lo_q_max], "color": "rgba(255,51,51,0.25)"}],
+        [{"range": [0.0,               LO_BANKFULL_Q * 0.45], "color": "rgba(0,255,156,0.15)"},
+         {"range": [LO_BANKFULL_Q*0.45, LO_BANKFULL_Q * 0.95], "color": "rgba(255,215,0,0.20)"},
+         {"range": [LO_BANKFULL_Q*0.95, _lo_q_max],             "color": "rgba(255,51,51,0.25)"}],
         lo_flow_clr, lo_flow_lbl, lo_flow_clr,
         f"Q: {st.session_state.lo_flow:.1f} cfs"
     ), height=240)
@@ -1471,7 +1456,7 @@ st.markdown('</div>', unsafe_allow_html=True)
 # ── PANEL 5: WATERSHED COMPARISON ────────────────────────────────────────────
 st.markdown('<div class="panel"><div class="panel-title">WATERSHED COMPARISON &mdash; UPPER vs LOWER SUB-BASIN | CULLOWHEE CREEK</div>', unsafe_allow_html=True)
 
-dq     = round(st.session_state.lo_flow - st.session_state.up_flow, 1)
+dq     = round(st.session_state.lo_flow  - st.session_state.up_flow,  1)
 dd     = round(st.session_state.lo_depth - st.session_state.up_depth, 2)
 dq_pct = round((dq / st.session_state.up_flow * 100) if st.session_state.up_flow > 0 else 0, 1)
 
@@ -1518,15 +1503,7 @@ st.markdown(f"""
 tw1, tw2, tw3 = st.columns([1, 2, 1])
 with tw2:
     st.plotly_chart(
-        make_dial(
-            travel_min,
-            "WAVE TRAVEL",
-            15,
-            90,
-            " min",
-            _tw_clr,
-            sub="UPPER → LOWER"
-        ),
+        make_dial(travel_min, "WAVE TRAVEL", 15, 90, " min", _tw_clr, sub="UPPER → LOWER"),
         use_container_width=True
     )
 
@@ -1541,9 +1518,8 @@ if not forecast:
 else:
     pcols = st.columns(7)
     for i, d in enumerate(forecast[:7]):
-        risk = min(100.0, round((soil_sat_lo * 0.35) + (d["pop"] * 0.35) + (d["qpf_in"] * 20), 1))
+        risk  = min(100.0, round((soil_sat_lo * 0.35) + (d["pop"] * 0.35) + (d["qpf_in"] * 20), 1))
         color = "#00FF9C" if risk < 30 else "#FFFF00" if risk < 50 else "#FFD700" if risk < 65 else "#FF8800" if risk < 80 else "#FF3333"
-
         with pcols[i]:
             st.markdown(
                 '<div style="background:rgba(255,255,255,0.03); border-top:4px solid '
