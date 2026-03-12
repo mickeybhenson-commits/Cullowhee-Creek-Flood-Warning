@@ -1112,24 +1112,28 @@ def forecast_icon(txt):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def make_dial(v, t, min_v, max_v, u, c, sub=""):
-    parts = [f"<b>{t}</b>"]
-    if sub:
-        parts.append(f"<span style='font-size:11px;color:#7AACCC'>{sub}</span>")
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
         value=v,
-        number={"suffix": u, "font": {"size": 24, "color": "white"}, "valueformat": ".1f"},
-        title={"text": "<br>".join(parts), "font": {"size": 13, "color": "#A0C8E0"}},
+        number={
+            "suffix": u,
+            "font": {"size": 26, "color": "white", "family": "Rajdhani"},
+            "valueformat": ".1f",
+        },
+        title={
+            "text": f"<b>{t}</b>",
+            "font": {"size": 13, "color": "#A0C8E0", "family": "Share Tech Mono"},
+        },
         gauge={
             "axis": {"range": [min_v, max_v], "tickfont": {"size": 9, "color": "#334455"}},
-            "bar": {"color": c, "thickness": 0.25},
+            "bar":  {"color": c, "thickness": 0.25},
             "bgcolor": "rgba(0,0,0,0)",
         },
     ))
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)",
-        margin=dict(t=70, b=20, l=25, r=25),
-        height=185
+        margin=dict(t=60, b=10, l=30, r=30),
+        height=190,
     )
     return fig
 
@@ -1509,9 +1513,9 @@ with c1:
 with c2:
     st.plotly_chart(make_dial(current_conditions["temp"], "TEMPERATURE", 0, 110, " F", "#FF3333"), use_container_width=True)
 with c3:
-    st.plotly_chart(make_dial(display_rain_now, "RAIN NOW", 0, 4, '" / hr', "#0077FF", sub="Current intensity"), use_container_width=True)
+    st.plotly_chart(make_dial(display_rain_now, "RAIN NOW", 0, 4, '" / hr', "#0077FF"), use_container_width=True)
 with c4:
-    st.plotly_chart(make_dial(rain_7d, "RAIN (7-DAY)", 0, 10, '"', _r7_clr, sub=_r7_src), use_container_width=True)
+    st.plotly_chart(make_dial(rain_7d, "RAIN (7-DAY)", 0, 10, '"', _r7_clr), use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 
