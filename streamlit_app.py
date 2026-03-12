@@ -30,14 +30,7 @@ UTC_TZ = ZoneInfo("UTC")
 
 # -----------------------------------------------------------------------------
 # REAL-TIME OBSERVED RAIN CONFIG
-#
-# Supported station adapter types:
-#   1) "custom_json"    -> your own relay / Blues bridge / AWN proxy
-#   2) "weathercom_pws" -> optional official PWS API if you have an API key
-#
-# No provider/source names are shown in Streamlit.
 # -----------------------------------------------------------------------------
-
 REALTIME_RAIN_STATIONS = [
     {
         "name": "Primary Basin Rain",
@@ -74,29 +67,87 @@ REQUEST_TIMEOUT_SEC = 10
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap');
-html, body, .stApp { background-color: #04090F; color: #E0E8F0; font-family: 'Rajdhani', sans-serif; }
-.site-header { border-left: 6px solid #0077FF; padding: 14px 22px; margin-bottom: 20px;
-               background: rgba(0,100,200,0.07); border-radius: 0 8px 8px 0; }
-.site-title  { font-size: 2.4em; font-weight: 700; color: #FFFFFF; margin: 0; letter-spacing: 2px; }
-.site-sub    { font-family: 'Share Tech Mono', monospace; font-size: 0.75em; color: #5AACD0; margin-top: 4px; }
 
-.panel       { background: rgba(8,16,28,0.88); border: 1px solid rgba(0,119,255,0.18);
-               border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; }
-.panel-title { font-family: 'Share Tech Mono', monospace; font-size: 0.78em; color: #0077FF;
-               text-transform: uppercase; letter-spacing: 3px;
-               border-bottom: 1px solid rgba(0,119,255,0.18); padding-bottom: 8px; margin-bottom: 14px; }
+html, body, .stApp {
+    background-color: #04090F;
+    color: #E0E8F0;
+    font-family: 'Rajdhani', sans-serif;
+}
 
-.upper-panel { background: rgba(8,16,28,0.88); border: 1px solid rgba(0,180,100,0.25);
-               border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; }
-.upper-title { font-family: 'Share Tech Mono', monospace; font-size: 0.78em; color: #00CC77;
-               text-transform: uppercase; letter-spacing: 3px;
-               border-bottom: 1px solid rgba(0,180,100,0.25); padding-bottom: 8px; margin-bottom: 14px; }
+.site-header {
+    border-left: 6px solid #0077FF;
+    padding: 14px 22px;
+    margin-bottom: 20px;
+    background: rgba(0,100,200,0.07);
+    border-radius: 0 8px 8px 0;
+}
+.site-title  {
+    font-size: 2.4em;
+    font-weight: 700;
+    color: #FFFFFF;
+    margin: 0;
+    letter-spacing: 2px;
+}
+.site-sub    {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.75em;
+    color: #5AACD0;
+    margin-top: 4px;
+}
 
-.lower-panel { background: rgba(8,16,28,0.88); border: 1px solid rgba(0,119,255,0.25);
-               border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; }
-.lower-title { font-family: 'Share Tech Mono', monospace; font-size: 0.78em; color: #0099FF;
-               text-transform: uppercase; letter-spacing: 3px;
-               border-bottom: 1px solid rgba(0,119,255,0.25); padding-bottom: 8px; margin-bottom: 14px; }
+.panel {
+    background: rgba(8,16,28,0.88);
+    border: 1px solid rgba(0,119,255,0.18);
+    border-radius: 10px;
+    padding: 18px 20px;
+    margin-bottom: 16px;
+}
+.panel-title {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.78em;
+    color: #0077FF;
+    text-transform: uppercase;
+    letter-spacing: 3px;
+    border-bottom: 1px solid rgba(0,119,255,0.18);
+    padding-bottom: 8px;
+    margin-bottom: 14px;
+}
+
+.upper-panel {
+    background: rgba(8,16,28,0.88);
+    border: 1px solid rgba(0,180,100,0.25);
+    border-radius: 10px;
+    padding: 18px 20px;
+    margin-bottom: 16px;
+}
+.upper-title {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.78em;
+    color: #00CC77;
+    text-transform: uppercase;
+    letter-spacing: 3px;
+    border-bottom: 1px solid rgba(0,180,100,0.25);
+    padding-bottom: 8px;
+    margin-bottom: 14px;
+}
+
+.lower-panel {
+    background: rgba(8,16,28,0.88);
+    border: 1px solid rgba(0,119,255,0.25);
+    border-radius: 10px;
+    padding: 18px 20px;
+    margin-bottom: 16px;
+}
+.lower-title {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.78em;
+    color: #0099FF;
+    text-transform: uppercase;
+    letter-spacing: 3px;
+    border-bottom: 1px solid rgba(0,119,255,0.25);
+    padding-bottom: 8px;
+    margin-bottom: 14px;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -510,11 +561,6 @@ def fetch_usdm_drought():
 
 @st.cache_data(ttl=300)
 def fetch_active_alerts():
-    """
-    Hidden NWS alert fetch.
-    Returns active alerts affecting the dashboard point.
-    Nothing in the UI says 'NWS'.
-    """
     try:
         hdrs = {"User-Agent": "NOAH-FloodWarning/1.0"}
         r = requests.get(
@@ -572,6 +618,67 @@ def fetch_active_alerts():
         return alerts
     except Exception:
         return []
+
+
+@st.cache_data(ttl=300)
+def fetch_hazardous_weather_outlook():
+    """
+    Pulls the zone products page used by the local point page and extracts
+    Hazardous Weather Outlook text if present.
+    """
+    try:
+        url = (
+            "https://forecast.weather.gov/showsigwx.php"
+            "?warnzone=NCZ059&warncounty=NCC099&firewxzone=NCZ059"
+            "&local_place1=Cullowhee%20NC"
+            "&product1=Hazardous+Weather+Outlook"
+            f"&lat={LAT}&lon={LON}"
+        )
+        r = requests.get(url, timeout=10)
+        txt = r.text
+
+        if "Hazardous Weather Outlook" not in txt and "HAZARDOUS WEATHER OUTLOOK" not in txt:
+            return None
+
+        # very light HTML cleanup
+        body = txt.replace("\r", "\n")
+        for token in [
+            "<br>", "<br/>", "<br />", "</p>", "<p>", "</div>", "<div>",
+            "&nbsp;", "&#39;", "&amp;", "&quot;"
+        ]:
+            repl = "\n" if "br" in token or token in ["</p>", "<p>", "</div>", "<div>"] else " "
+            body = body.replace(token, repl)
+
+        import re
+        body = re.sub(r"<[^>]+>", " ", body)
+        body = re.sub(r"\s+", " ", body).strip()
+
+        lower = body.lower()
+        idx = lower.find("hazardous weather outlook")
+        if idx >= 0:
+            body = body[idx:]
+
+        # Try to isolate the meaningful outlook portion
+        snippet = body
+        stop_markers = [
+            "spotter information statement",
+            "additional information",
+            "$$",
+        ]
+        lower_snip = snippet.lower()
+        cut = len(snippet)
+        for marker in stop_markers:
+            j = lower_snip.find(marker)
+            if j > 0:
+                cut = min(cut, j)
+        snippet = snippet[:cut].strip()
+
+        if len(snippet) > 500:
+            snippet = snippet[:497] + "..."
+
+        return snippet if snippet else None
+    except Exception:
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1047,6 +1154,7 @@ forecast = _build_unified_daily_forecast()
 backup_hist = fetch_backup_precip_history()
 station_rain = fetch_realtime_station_bundle()
 active_alerts = fetch_active_alerts()
+hwo_text = fetch_hazardous_weather_outlook()
 
 sm_07, sm_728, sm_ts, sm_ok       = fetch_era5_soil_moisture()
 usdm_level, usdm_label, usdm_date = fetch_usdm_drought()
@@ -1189,7 +1297,7 @@ st.markdown(f"""
 </div>""", unsafe_allow_html=True)
 
 
-# ── PANEL 1B: ACTIVE ALERTS ───────────────────────────────────────────────────
+# ── PANEL 1B: ACTIVE WEATHER ALERTS ───────────────────────────────────────────
 if active_alerts:
     st.markdown('<div class="panel"><div class="panel-title">ACTIVE WEATHER ALERTS</div>', unsafe_allow_html=True)
     for a in active_alerts:
@@ -1214,6 +1322,27 @@ if active_alerts:
 </div>
 """, unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
+
+
+# ── PANEL 1C: WEATHER OUTLOOK ────────────────────────────────────────────────
+if hwo_text:
+    st.markdown("""
+<div class="panel">
+  <div class="panel-title">WEATHER OUTLOOK</div>
+""", unsafe_allow_html=True)
+    st.markdown(f"""
+<div style="background:rgba(0,120,220,0.10); border-left:6px solid #33A8FF;
+            border-radius:8px; padding:14px 16px; margin-bottom:6px;">
+  <div style="font-family:'Share Tech Mono',monospace; font-size:0.78em; color:#66C2FF;
+              letter-spacing:2px; margin-bottom:6px;">
+    HAZARDOUS WEATHER OUTLOOK
+  </div>
+  <div style="font-size:0.92em; color:#D8ECFF; line-height:1.45;">
+    {hwo_text}
+  </div>
+</div>
+</div>
+""", unsafe_allow_html=True)
 
 
 # ── PANEL 2: ATMOSPHERIC CONDITIONS ──────────────────────────────────────────
