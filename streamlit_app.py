@@ -1,7 +1,6 @@
 """
 NOAH: Cullowhee Creek Flood Warning Dashboard
-Western Carolina University — NEMO River Energy Initiative
-Jackson County, NC — Watershed Monitoring System
+Nautilius Technologies, Franklin, NC
 """
 
 import math
