@@ -1,12 +1,19 @@
 """
 NOAH: Cullowhee Creek Flood Warning Dashboard
-Western Carolina University — NEMO River Energy Initiative
-Jackson County, NC — Watershed Monitoring System
+Nautilus Technologies — Jackson County, NC — Watershed Monitoring System
+
+Precipitation fallback chain (priority order):
+  1. Live configured PWS stations  (custom_json / weathercom_pws)
+  2. Iowa Env. Mesonet ASOS        (KRHP / KAND / KAVL — no key, ~5 min lag)
+  3. Open-Meteo FORECAST model     (past_days, no key, ~1 hr lag)
+  4. NWS forecastGridData QPE      (mined from already-fetched grid call)
+  5. ERA5 archive                  (last resort — 1-2 day lag)
 """
 
 import math
 import json
 import time
+import logging
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 from collections import defaultdict
@@ -16,6 +23,7 @@ import streamlit as st
 import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
 
+log = logging.getLogger("NOAH.precip")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  1. CONFIGURATION & STYLING
@@ -63,6 +71,12 @@ REALTIME_RAIN_STATIONS = [
 ]
 
 REQUEST_TIMEOUT_SEC = 10
+
+# ASOS stations ranked by proximity to Cullowhee
+# RHP = Andrews-Murphy Airport (~18 mi)
+# AND = Anderson SC (~60 mi fallback)
+# AVL = Asheville Regional (~35 mi fallback)
+ASOS_STATIONS = ["RHP", "AND", "AVL"]
 
 st.markdown("""
 <style>
@@ -259,6 +273,11 @@ def _fetch_hidden_short_range_hourly():
 
 @st.cache_data(ttl=1800)
 def _fetch_hidden_daily_forecast():
+    """
+    Fetches NWS grid forecast data.
+    ALSO caches the raw grid properties to session_state so the precip
+    fallback chain can mine observed QPE without a second network call.
+    """
     try:
         hdrs = {"User-Agent": "NOAH-FloodWarning/1.0"}
         pts = requests.get(
@@ -273,11 +292,18 @@ def _fetch_hidden_daily_forecast():
             timeout=10
         ).json()["properties"]["periods"]
 
-        grid = requests.get(
+        # ── CHANGE: capture full grid response, store props in session_state ──
+        grid_response = requests.get(
             pts["forecastGridData"],
             headers=hdrs,
             timeout=15
-        ).json()["properties"]
+        ).json()
+        grid = grid_response["properties"]
+        try:
+            st.session_state["_nws_grid_props"] = grid
+        except Exception:
+            pass
+        # ─────────────────────────────────────────────────────────────────────
 
         qpf_by_date = defaultdict(float)
         for entry in grid.get("quantitativePrecipitation", {}).get("values", []):
@@ -431,67 +457,405 @@ def fetch_current_conditions():
         }
 
 
-@st.cache_data(ttl=1800)
-def fetch_backup_precip_history():
+# ═══════════════════════════════════════════════════════════════════════════════
+#  4A. PRECIPITATION FALLBACK CHAIN  (v2 — replaces fetch_backup_precip_history)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _clean_precip(x, lo=0.0, hi=50.0):
+    """Return float clamped to [lo, hi] or None on bad/missing data."""
     try:
+        v = float(x)
+        if math.isnan(v) or v < lo or v > hi:
+            return None
+        return v
+    except Exception:
+        return None
+
+
+def _sum_pairs(pairs, max_age_hr):
+    """Sum (age_hr, precip_in) pairs where 0 <= age_hr <= max_age_hr."""
+    return round(sum(p for age, p in pairs if 0 <= age <= max_age_hr), 3)
+
+
+# ── SOURCE 2: Iowa Env. Mesonet ASOS  (no API key, ~5 min lag) ────────────────
+
+@st.cache_data(ttl=300)
+def _fetch_asos_precip(station: str = "RHP") -> dict:
+    """
+    Pull 7-day hourly precip from Iowa Mesonet ASOS for a given station.
+    p01i = hourly precip accumulation (inches).
+    'T' (trace) → 0.001 in.   'M' (missing) → skipped.
+    """
+    try:
+        now_utc   = datetime.now(UTC_TZ)
+        start_utc = now_utc - timedelta(days=7, hours=2)
+
         r = requests.get(
-            "https://api.open-meteo.com/v1/forecast",
+            "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py",
             params={
-                "latitude": LAT,
-                "longitude": LON,
-                "hourly": "precipitation,snowfall",
-                "precipitation_unit": "inch",
-                "past_days": 14,
-                "forecast_days": 1,
-                "models": "best_match",
+                "station":   station,
+                "data":      "p01i",
+                "year1":     start_utc.strftime("%Y"),
+                "month1":    start_utc.strftime("%m"),
+                "day1":      start_utc.strftime("%d"),
+                "hour1":     start_utc.strftime("%H"),
+                "minute1":   "00",
+                "year2":     now_utc.strftime("%Y"),
+                "month2":    now_utc.strftime("%m"),
+                "day2":      now_utc.strftime("%d"),
+                "hour2":     now_utc.strftime("%H"),
+                "minute2":   "00",
+                "tz":        "UTC",
+                "format":    "onlycomma",
+                "latlon":    "no",
+                "missing":   "M",
+                "trace":     "T",
+                "direct":    "no",
+                "report_type": "3",
             },
-            timeout=10
-        ).json()
+            timeout=REQUEST_TIMEOUT_SEC,
+        )
+        r.raise_for_status()
 
-        now      = datetime.utcnow()
-        times    = r["hourly"]["time"]
-        precip_h = r["hourly"]["precipitation"]
-        snow_h   = r["hourly"].get("snowfall", [0] * len(times))
+        lines = [l for l in r.text.strip().splitlines()
+                 if l and not l.startswith("#") and not l.lower().startswith("station")]
 
-        t14d = t7d = t5d = t24h = snow7d = 0.0
-        for i, t in enumerate(times):
+        if not lines:
+            return {"ok": False, "source": f"ASOS-{station}", "reason": "no data rows"}
+
+        now_et = datetime.now(ET_TZ)
+        pairs  = []
+
+        for line in lines:
+            parts = line.split(",")
+            if len(parts) < 3:
+                continue
+            raw_time   = parts[1].strip()
+            raw_precip = parts[2].strip()
+            if raw_precip.upper() == "T":
+                raw_precip = "0.001"
+            p = _clean_precip(raw_precip, 0, 5)
+            if p is None:
+                continue
             try:
-                dt = datetime.fromisoformat(t)
+                obs_utc = datetime.strptime(raw_time, "%Y-%m-%d %H:%M").replace(tzinfo=UTC_TZ)
+                age_hr  = (now_et - obs_utc.astimezone(ET_TZ)).total_seconds() / 3600.0
+                if age_hr < 0:
+                    continue
+                pairs.append((age_hr, p))
             except Exception:
                 continue
-            age = (now - dt).total_seconds() / 86400
-            if age < 0:
-                continue
-            p = precip_h[i] or 0.0
-            s = (snow_h[i] or 0.0) * 0.0393701
-            if age <= 14:
-                t14d += p
-            if age <= 7:
-                t7d += p
-                snow7d += s
-            if age <= 5:
-                t5d += p
-            if age <= 1:
-                t24h += p
+
+        if not pairs:
+            return {"ok": False, "source": f"ASOS-{station}", "reason": "no parseable rows"}
 
         return {
-            "ok": True,
-            "rain_14d_in": round(t14d, 2),
-            "rain_7d_in": round(t7d, 2),
-            "rain_5d_in": round(t5d, 2),
-            "rain_24h_in": round(t24h, 2),
-            "snow_7d_in": round(snow7d, 2),
+            "ok":          True,
+            "source":      f"ASOS-{station}",
+            "rain_1h_in":  _sum_pairs(pairs, 1),
+            "rain_24h_in": _sum_pairs(pairs, 24),
+            "rain_3d_in":  _sum_pairs(pairs, 72),
+            "rain_5d_in":  _sum_pairs(pairs, 120),
+            "rain_7d_in":  _sum_pairs(pairs, 168),
+            "rain_14d_in": None,   # 7-day query limit
+            "snow_7d_in":  None,
+        }
+    except Exception as exc:
+        return {"ok": False, "source": f"ASOS-{station}", "reason": str(exc)}
+
+
+def _fetch_asos_best() -> dict:
+    """Try ASOS stations in priority order, return first good result."""
+    for station in ASOS_STATIONS:
+        result = _fetch_asos_precip(station)
+        if result.get("ok"):
+            return result
+    return {"ok": False, "source": "ASOS-all-failed"}
+
+
+# ── SOURCE 3: Open-Meteo FORECAST model w/ past_days  (~1 hr lag) ─────────────
+
+@st.cache_data(ttl=600)
+def _fetch_openmeteo_recent_precip() -> dict:
+    """
+    Uses the FORECAST endpoint (not the archive) with past_days=14.
+    The forecast model reanalysis blend lags ~1 hour vs. ERA5's 1-2 days.
+    This is the key fix for active storm events.
+    """
+    try:
+        r = requests.get(
+            "https://api.open-meteo.com/v1/forecast",   # ← FORECAST, not archive
+            params={
+                "latitude":           LAT,
+                "longitude":          LON,
+                "hourly":             "precipitation,snowfall",
+                "precipitation_unit": "inch",
+                "past_days":          14,
+                "forecast_days":      1,
+                "models":             "best_match",
+            },
+            timeout=REQUEST_TIMEOUT_SEC,
+        ).json()
+
+        times    = r["hourly"]["time"]
+        precip_h = r["hourly"].get("precipitation", [])
+        snow_h   = r["hourly"].get("snowfall", [0] * len(times))
+
+        now_et     = datetime.now(ET_TZ)
+        pairs      = []
+        snow_pairs = []
+
+        for i, t in enumerate(times):
+            try:
+                dt_utc = datetime.fromisoformat(t).replace(tzinfo=UTC_TZ)
+                age_hr = (now_et - dt_utc.astimezone(ET_TZ)).total_seconds() / 3600.0
+                if age_hr < 0:
+                    continue
+            except Exception:
+                continue
+
+            p = _clean_precip(precip_h[i] if i < len(precip_h) else None, 0, 5) or 0.0
+            s = (_clean_precip(snow_h[i]  if i < len(snow_h)   else None, 0, 30) or 0.0) * 0.0393701
+            pairs.append((age_hr, p))
+            snow_pairs.append((age_hr, s))
+
+        if not pairs:
+            return {"ok": False, "source": "OpenMeteo-forecast", "reason": "no rows"}
+
+        return {
+            "ok":          True,
+            "source":      "OpenMeteo-forecast",
+            "rain_1h_in":  _sum_pairs(pairs, 1),
+            "rain_24h_in": _sum_pairs(pairs, 24),
+            "rain_3d_in":  _sum_pairs(pairs, 72),
+            "rain_5d_in":  _sum_pairs(pairs, 120),
+            "rain_7d_in":  _sum_pairs(pairs, 168),
+            "rain_14d_in": _sum_pairs(pairs, 336),
+            "snow_7d_in":  _sum_pairs(snow_pairs, 168),
+        }
+    except Exception as exc:
+        return {"ok": False, "source": "OpenMeteo-forecast", "reason": str(exc)}
+
+
+# ── SOURCE 4: NWS forecastGridData observed QPE  (already fetched, free) ──────
+
+def _parse_nws_grid_qpe(grid_props: dict) -> dict:
+    """
+    Mine quantitativePrecipitation from the NWS forecastGridData properties
+    dict already fetched by _fetch_hidden_daily_forecast().
+    Includes both past observed/blended QPE and future QPF in the same series.
+    NWS QPP values are in mm — convert × 0.0393701 → inches.
+    """
+    try:
+        now_et  = datetime.now(ET_TZ)
+        qp_vals = grid_props.get("quantitativePrecipitation", {}).get("values", [])
+
+        if not qp_vals:
+            return {"ok": False, "source": "NWS-grid-QPE", "reason": "no qp values"}
+
+        pairs = []
+        for entry in qp_vals:
+            try:
+                vt_str, dur_str = entry["validTime"].split("/")
+                dt_et  = datetime.fromisoformat(vt_str).astimezone(ET_TZ)
+
+                dur_hrs = 1.0
+                if dur_str.startswith("PT") and dur_str.endswith("H"):
+                    dur_hrs = float(dur_str[2:-1])
+                elif "D" in dur_str:
+                    dur_hrs = 24.0
+
+                val_mm = entry.get("value")
+                if val_mm is None:
+                    continue
+                val_in   = float(val_mm) * 0.0393701
+                hrly_in  = val_in / max(dur_hrs, 1.0)
+
+                # distribute interval into hourly slots; only past hours
+                for h in range(int(dur_hrs)):
+                    slot_et = dt_et + timedelta(hours=h)
+                    age_hr  = (now_et - slot_et).total_seconds() / 3600.0
+                    if age_hr >= 0:
+                        pairs.append((age_hr, hrly_in))
+            except Exception:
+                continue
+
+        if not pairs:
+            return {"ok": False, "source": "NWS-grid-QPE", "reason": "no parseable entries"}
+
+        return {
+            "ok":          True,
+            "source":      "NWS-grid-QPE",
+            "rain_1h_in":  _sum_pairs(pairs, 1),
+            "rain_24h_in": _sum_pairs(pairs, 24),
+            "rain_3d_in":  _sum_pairs(pairs, 72),
+            "rain_5d_in":  _sum_pairs(pairs, 120),
+            "rain_7d_in":  _sum_pairs(pairs, 168),
+            "rain_14d_in": _sum_pairs(pairs, 336),
+            "snow_7d_in":  None,
+        }
+    except Exception as exc:
+        return {"ok": False, "source": "NWS-grid-QPE", "reason": str(exc)}
+
+
+# ── SOURCE 5: ERA5 archive  (original — last resort, 1-2 day lag) ─────────────
+
+@st.cache_data(ttl=3600)
+def _fetch_era5_precip_archive() -> dict:
+    """Original ERA5 backup, demoted to last resort."""
+    try:
+        end_dt   = date.today()
+        start_dt = date.today() - timedelta(days=14)
+        r = requests.get(
+            "https://archive-api.open-meteo.com/v1/archive",
+            params={
+                "latitude":           LAT,
+                "longitude":          LON,
+                "hourly":             "precipitation,snowfall",
+                "precipitation_unit": "inch",
+                "models":             "era5_land",
+                "start_date":         start_dt.strftime("%Y-%m-%d"),
+                "end_date":           end_dt.strftime("%Y-%m-%d"),
+            },
+            timeout=15,
+        ).json()
+
+        times    = r["hourly"]["time"]
+        precip_h = r["hourly"].get("precipitation", [])
+        snow_h   = r["hourly"].get("snowfall", [0] * len(times))
+
+        now_et     = datetime.now(ET_TZ)
+        pairs      = []
+        snow_pairs = []
+
+        for i, t in enumerate(times):
+            try:
+                dt_utc = datetime.fromisoformat(t).replace(tzinfo=UTC_TZ)
+                age_hr = (now_et - dt_utc.astimezone(ET_TZ)).total_seconds() / 3600.0
+                if age_hr < 0:
+                    continue
+            except Exception:
+                continue
+
+            p = _clean_precip(precip_h[i] if i < len(precip_h) else None, 0, 5) or 0.0
+            s = (_clean_precip(snow_h[i]  if i < len(snow_h)   else None, 0, 30) or 0.0) * 0.0393701
+            pairs.append((age_hr, p))
+            snow_pairs.append((age_hr, s))
+
+        if not pairs:
+            raise ValueError("no rows")
+
+        return {
+            "ok":          True,
+            "source":      "ERA5-archive",
+            "rain_1h_in":  _sum_pairs(pairs, 1),
+            "rain_24h_in": _sum_pairs(pairs, 24),
+            "rain_3d_in":  _sum_pairs(pairs, 72),
+            "rain_5d_in":  _sum_pairs(pairs, 120),
+            "rain_7d_in":  _sum_pairs(pairs, 168),
+            "rain_14d_in": _sum_pairs(pairs, 336),
+            "snow_7d_in":  _sum_pairs(snow_pairs, 168),
         }
     except Exception:
         return {
-            "ok": False,
-            "rain_14d_in": 2.10,
-            "rain_7d_in": 0.50,
-            "rain_5d_in": 0.50,
-            "rain_24h_in": 0.00,
-            "snow_7d_in": 0.00,
+            "ok": False, "source": "ERA5-archive",
+            "rain_1h_in": 0.0, "rain_24h_in": 0.0, "rain_3d_in": 0.0,
+            "rain_5d_in": 0.5, "rain_7d_in": 0.5, "rain_14d_in": 2.0,
+            "snow_7d_in": 0.0,
         }
 
+
+# ── ORCHESTRATOR ──────────────────────────────────────────────────────────────
+
+def _merge_precip(primary: dict, secondary: dict) -> dict:
+    """Fill None gaps in primary with secondary values. Primary always wins."""
+    merged = dict(primary)
+    for key in ["rain_1h_in", "rain_24h_in", "rain_3d_in",
+                "rain_5d_in", "rain_7d_in", "rain_14d_in", "snow_7d_in"]:
+        if merged.get(key) is None and secondary.get(key) is not None:
+            merged[key] = secondary[key]
+    return merged
+
+
+def fetch_precip_best_available(nws_grid_props: dict = None) -> dict:
+    """
+    Main precip entry point.  Replaces the old fetch_backup_precip_history().
+
+    Fallback chain:
+      2. ASOS (Iowa Mesonet, KRHP → KAND → KAVL)
+      3. Open-Meteo forecast model w/ past_days
+      4. NWS forecastGridData QPE  (pass nws_grid_props to use; else skipped)
+      5. ERA5 archive               (last resort)
+
+    Returns dict with: ok, source, sources[], rain_1h/24h/3d/5d/7d/14d_in, snow_7d_in
+    The 'source' key drives the data quality badge in Panel 2.
+    """
+    results = []
+    best    = None
+
+    # Source 2 — ASOS
+    asos = _fetch_asos_best()
+    if asos.get("ok"):
+        results.append(asos)
+        best = asos
+
+    # Source 3 — Open-Meteo forecast model (fills gaps ASOS can't cover, e.g. 14d)
+    om = _fetch_openmeteo_recent_precip()
+    if om.get("ok"):
+        results.append(om)
+        best = _merge_precip(best, om) if best else om
+
+    # Source 4 — NWS grid QPE (free — data already fetched)
+    if nws_grid_props is not None:
+        nws = _parse_nws_grid_qpe(nws_grid_props)
+        if nws.get("ok"):
+            results.append(nws)
+            best = _merge_precip(best, nws) if best else nws
+
+    # Source 5 — ERA5 archive (last resort)
+    if best is None or best.get("rain_7d_in") is None:
+        era5 = _fetch_era5_precip_archive()
+        results.append(era5)
+        best = _merge_precip(best, era5) if best else era5
+
+    if best is None:
+        return {
+            "ok": False, "source": "ALL-SOURCES-FAILED", "sources": [],
+            "rain_1h_in": 0.0, "rain_24h_in": 0.0, "rain_3d_in": 0.0,
+            "rain_5d_in": 0.5, "rain_7d_in": 0.5, "rain_14d_in": 2.0,
+            "snow_7d_in": 0.0,
+        }
+
+    # Ensure all keys exist
+    for key in ["rain_1h_in", "rain_24h_in", "rain_3d_in",
+                "rain_5d_in", "rain_7d_in", "rain_14d_in", "snow_7d_in"]:
+        if best.get(key) is None:
+            best[key] = 0.0
+
+    best["ok"]      = True
+    best["sources"] = [r["source"] for r in results if r.get("ok")]
+    return best
+
+
+def _precip_source_badge(station_rain: dict, backup_hist: dict) -> tuple:
+    """Returns (label, color) for the data quality badge in Panel 2."""
+    if station_rain.get("ok"):
+        return f"{station_rain['count']} LIVE PWS", "#00FF9C"
+    src = backup_hist.get("source", "UNKNOWN")
+    if "ASOS" in src:
+        return f"ASOS ({src.split('-')[-1]})", "#00FF9C"
+    if "OpenMeteo-forecast" in src:
+        return "OPEN-METEO FCST MODEL", "#FFD700"
+    if "NWS" in src:
+        return "NWS GRID QPE", "#FFD700"
+    if "ERA5" in src:
+        return "ERA5 ARCHIVE \u26a0 LAGGED", "#FF3333"
+    return "SOURCE UNKNOWN", "#FF8800"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  4B. ERA5 SOIL MOISTURE  (unchanged — separate from precip chain)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=3600)
 def fetch_era5_soil_moisture():
@@ -523,6 +887,10 @@ def fetch_era5_soil_moisture():
     except Exception:
         return None, None, None, False
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  4C. ALERTS, DROUGHT, HWO  (unchanged)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=3600)
 def fetch_usdm_drought():
@@ -622,45 +990,34 @@ def fetch_active_alerts():
 
 @st.cache_data(ttl=900)
 def fetch_hazardous_weather_outlook():
-    """
-    Pulls the latest Hazardous Weather Outlook from the NWS Products API
-    for the GSP (Greenville-Spartanburg) WFO.
-    Returns dict with 'issued' (str) and 'paragraphs' (list of {header, body}),
-    or None if unavailable.
-    """
     import re
     from html import escape as html_escape
 
     try:
         hdrs = {"User-Agent": "NOAH-FloodWarning/1.0 (WCU NEMO Project)"}
 
-        # Step 1 — list recent HWO products from GSP
         index = requests.get(
             "https://api.weather.gov/products/types/HWO/locations/GSP",
-            headers=hdrs,
-            timeout=10,
+            headers=hdrs, timeout=10,
         ).json()
 
         graph = index.get("@graph", [])
         if not graph:
             return None
 
-        # Step 2 — fetch most recent product
         latest_id = graph[0].get("id", "")
         if not latest_id:
             return None
 
         prod = requests.get(
             f"https://api.weather.gov/products/{latest_id}",
-            headers=hdrs,
-            timeout=10,
+            headers=hdrs, timeout=10,
         ).json()
 
         raw = prod.get("productText", "")
         if not raw:
             return None
 
-        # Step 3 — parse issuance time from API metadata (clean, no scraping)
         issued_str = ""
         issued_raw = prod.get("issuanceTime", "")
         if issued_raw:
@@ -672,38 +1029,22 @@ def fetch_hazardous_weather_outlook():
             except Exception:
                 issued_str = issued_raw[:16]
 
-        # Step 4 — normalise line endings
         raw = raw.replace("\r\n", "\n").replace("\r", "\n")
 
-        # Step 5 — skip EVERYTHING before the first .DAY / .DAYS / .THIS section
-        #           marker. This discards the WMO bulletin header, AWIPS ID,
-        #           product title, NWS office line, issue time, UGC zone string,
-        #           expiration timestamp — all the preamble garbage.
-        first_section = re.search(
-            r"(?m)^\.(DAY|DAYS|THIS)\b", raw, re.IGNORECASE
-        )
+        first_section = re.search(r"(?m)^\.(DAY|DAYS|THIS)\b", raw, re.IGNORECASE)
         if not first_section:
-            return None   # no recognised section structure → skip
+            return None
         body = raw[first_section.start():]
 
-        # Step 6 — cut at spotter statement / $$
-        stop_pat = re.compile(
-            r"(?m)(^\.(SPOTTER INFORMATION STATEMENT)|^\$\$)",
-            re.IGNORECASE
-        )
+        stop_pat = re.compile(r"(?m)(^\.(SPOTTER INFORMATION STATEMENT)|^\$\$)", re.IGNORECASE)
         m = stop_pat.search(body)
         if m:
             body = body[: m.start()]
 
-        # Step 7 — split on section markers (.DAY ONE..., .DAYS TWO THROUGH..., etc.)
-        #           re.split with a capturing group keeps the delimiters in the list.
         parts = re.split(r"(?m)(^\.[A-Z][A-Z0-9 ]+\.\.\.)", body)
-        # parts = [pre, header1, block1, header2, block2, ...]
-        # The first element is any text before the first header (usually empty).
 
         paragraphs = []
         i = 0
-        # skip any leading non-header text
         if parts and not re.match(r"^\.[A-Z]", parts[0].strip()):
             i = 1
         while i < len(parts):
@@ -711,14 +1052,10 @@ def fetch_hazardous_weather_outlook():
             raw_body   = parts[i + 1].strip() if i + 1 < len(parts) else ""
             i += 2
 
-            # Clean up body: collapse runs of blank lines to one, strip leading/trailing
             raw_body = re.sub(r"\n{3,}", "\n\n", raw_body).strip()
-
             if not raw_body:
                 continue
 
-            # HTML-escape both header and body so special chars (<, >, &, etc.)
-            # render as text, not as HTML tags
             paragraphs.append({
                 "header": html_escape(raw_header),
                 "body":   html_escape(raw_body),
@@ -727,17 +1064,14 @@ def fetch_hazardous_weather_outlook():
         if not paragraphs:
             return None
 
-        return {
-            "issued":     issued_str,
-            "paragraphs": paragraphs,
-        }
+        return {"issued": issued_str, "paragraphs": paragraphs}
 
     except Exception:
         return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  4B. OBSERVED RAIN ADAPTERS
+#  4D. OBSERVED RAIN ADAPTERS  (Tier 1 — live PWS, unchanged)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _clean_rain_value(x, min_v=0.0, max_v=50.0):
@@ -808,7 +1142,7 @@ def _fetch_weathercom_pws_station(station_cfg: dict) -> dict:
             timeout=REQUEST_TIMEOUT_SEC,
         ).json()
 
-        obs = (current.get("observations") or [{}])[0]
+        obs      = (current.get("observations") or [{}])[0]
         imperial = obs.get("imperial", {})
         out["rain_rate_in_hr"] = _clean_rain_value(imperial.get("precipRate"), 0, 15)
         out["rain_1h_in"]      = _clean_rain_value(imperial.get("precipTotal"), 0, 15)
@@ -836,27 +1170,19 @@ def _fetch_weathercom_pws_station(station_cfg: dict) -> dict:
             for row in rows:
                 try:
                     ts_utc = datetime.fromtimestamp(int(row["epoch"]), tz=UTC_TZ)
-                    ts_et = ts_utc.astimezone(ET_TZ)
-                    age_hr = (now_et - ts_et).total_seconds() / 3600.0
+                    age_hr = (now_et - ts_utc.astimezone(ET_TZ)).total_seconds() / 3600.0
                     if age_hr < 0:
                         continue
                     imperial = row.get("imperial", {})
-                    p = _clean_rain_value(imperial.get("precipTotal"), 0, 10)
-                    if p is None:
-                        p = 0.0
+                    p = _clean_rain_value(imperial.get("precipTotal"), 0, 10) or 0.0
                     hourly.append((age_hr, p))
                 except Exception:
                     continue
 
-            rain_24h = sum(p for age, p in hourly if age <= 24)
-            rain_72h = sum(p for age, p in hourly if age <= 72)
-            rain_5d  = sum(p for age, p in hourly if age <= 120)
-            rain_7d  = sum(p for age, p in hourly if age <= 168)
-
-            out["rain_24h_in"] = _clean_rain_value(rain_24h, 0, 30)
-            out["rain_3d_in"]  = _clean_rain_value(rain_72h, 0, 40)
-            out["rain_5d_in"]  = _clean_rain_value(rain_5d, 0, 50)
-            out["rain_7d_in"]  = _clean_rain_value(rain_7d, 0, 60)
+            out["rain_24h_in"] = _clean_rain_value(sum(p for a, p in hourly if a <= 24),  0, 30)
+            out["rain_3d_in"]  = _clean_rain_value(sum(p for a, p in hourly if a <= 72),  0, 40)
+            out["rain_5d_in"]  = _clean_rain_value(sum(p for a, p in hourly if a <= 120), 0, 50)
+            out["rain_7d_in"]  = _clean_rain_value(sum(p for a, p in hourly if a <= 168), 0, 60)
     except Exception:
         pass
 
@@ -900,17 +1226,17 @@ def fetch_realtime_station_bundle():
         "ok": True,
         "count": len(station_results),
         "rain_rate_in_hr": weighted_mean("rain_rate_in_hr"),
-        "rain_1h_in": weighted_mean("rain_1h_in"),
-        "rain_24h_in": weighted_mean("rain_24h_in"),
-        "rain_3d_in": weighted_mean("rain_3d_in"),
-        "rain_5d_in": weighted_mean("rain_5d_in"),
-        "rain_7d_in": weighted_mean("rain_7d_in"),
-        "rain_14d_in": weighted_mean("rain_14d_in"),
+        "rain_1h_in":      weighted_mean("rain_1h_in"),
+        "rain_24h_in":     weighted_mean("rain_24h_in"),
+        "rain_3d_in":      weighted_mean("rain_3d_in"),
+        "rain_5d_in":      weighted_mean("rain_5d_in"),
+        "rain_7d_in":      weighted_mean("rain_7d_in"),
+        "rain_14d_in":     weighted_mean("rain_14d_in"),
     }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  5. HYDRO-MODELING
+#  5. HYDRO-MODELING  (unchanged)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def calc_era5_sat_pct(sm_07, sm_728):
@@ -1108,7 +1434,7 @@ def forecast_icon(txt):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  6. UI COMPONENT BUILDERS
+#  6. UI COMPONENT BUILDERS  (unchanged)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def make_dial(v, t, min_v, max_v, u, c, sub=""):
@@ -1140,16 +1466,11 @@ def make_dial(v, t, min_v, max_v, u, c, sub=""):
 
 def make_stream_gauge(gid, v, min_v, max_v, unit, ranges, needle_clr,
                       status_lbl, status_clr, sub_line):
-    # Build arc data with both bright and dim variants precomputed in Python
-    # so zero regex or backslash manipulation is needed inside the f-string.
     arc_data = []
     for x in ranges:
-        base = x["color"]   # e.g. "rgba(0,255,156,0.15)"
-        # Dim version — replace last number before ) with 0.18
-        # Bright version — replace with 0.75
-        # We do this safely in Python, not in JS regex
+        base = x["color"]
         try:
-            prefix = base[:base.rfind(",") + 1]   # "rgba(r,g,b,"
+            prefix = base[:base.rfind(",") + 1]
             dim    = prefix + "0.18)"
             bright = prefix + "0.80)"
         except Exception:
@@ -1162,8 +1483,8 @@ def make_stream_gauge(gid, v, min_v, max_v, unit, ranges, needle_clr,
             "bright": bright,
         })
 
-    arc_js   = json.dumps(arc_data)
-    osc_amp  = round((max_v - min_v) * 0.008, 4)
+    arc_js  = json.dumps(arc_data)
+    osc_amp = round((max_v - min_v) * 0.008, 4)
 
     return f"""<html><body style="background:transparent;text-align:center;
 font-family:'Rajdhani',sans-serif;color:white;margin:0;padding:0;">
@@ -1249,25 +1570,10 @@ font-family:'Rajdhani',sans-serif;color:white;margin:0;padding:0;">
 def _alert_style(event_name: str):
     e = event_name.lower()
     if "warning" in e:
-        return {
-            "border": "#FF3333",
-            "text": "#FFCCCC",
-            "title": "#FF6666",
-            "bg": "rgba(255,51,51,0.10)",
-        }
+        return {"border": "#FF3333", "text": "#FFCCCC", "title": "#FF6666", "bg": "rgba(255,51,51,0.10)"}
     if "watch" in e:
-        return {
-            "border": "#FF8800",
-            "text": "#FFE0C2",
-            "title": "#FFB066",
-            "bg": "rgba(255,136,0,0.10)",
-        }
-    return {
-        "border": "#FFD700",
-        "text": "#FFF3B0",
-        "title": "#FFE866",
-        "bg": "rgba(255,215,0,0.10)",
-    }
+        return {"border": "#FF8800", "text": "#FFE0C2", "title": "#FFB066", "bg": "rgba(255,136,0,0.10)"}
+    return {"border": "#FFD700", "text": "#FFF3B0", "title": "#FFE866", "bg": "rgba(255,215,0,0.10)"}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1275,8 +1581,7 @@ def _alert_style(event_name: str):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 current_conditions = fetch_current_conditions()
-forecast           = _build_unified_daily_forecast()
-backup_hist        = fetch_backup_precip_history()
+forecast           = _build_unified_daily_forecast()   # also populates _nws_grid_props
 station_rain       = fetch_realtime_station_bundle()
 active_alerts      = fetch_active_alerts()
 hwo_text           = fetch_hazardous_weather_outlook()
@@ -1284,6 +1589,11 @@ hwo_text           = fetch_hazardous_weather_outlook()
 sm_07, sm_728, sm_ts, sm_ok       = fetch_era5_soil_moisture()
 usdm_level, usdm_label, usdm_date = fetch_usdm_drought()
 
+# ── PRECIP: multi-source fallback chain (v2) ──────────────────────────────────
+_nws_grid = st.session_state.get("_nws_grid_props")   # cached by _fetch_hidden_daily_forecast
+backup_hist = fetch_precip_best_available(nws_grid_props=_nws_grid)
+
+# ── SELECT FINAL RAIN VALUES: Tier 1 (live PWS) → Tier 2-5 (fallback chain) ──
 if station_rain.get("ok", False):
     rain_24h         = station_rain.get("rain_24h_in") or backup_hist["rain_24h_in"]
     rain_5d          = station_rain.get("rain_5d_in")  or backup_hist["rain_5d_in"]
@@ -1326,7 +1636,7 @@ soil_stored_up = _sat_stored(soil_sat_up)
 qpf_24h = forecast[0]["qpf_in"] if forecast else 0.0
 pop_24h  = forecast[0]["pop"]    if forecast else 0.0
 
-threat          = flood_threat_score(soil_sat_lo, qpf_24h, pop_24h)
+threat              = flood_threat_score(soil_sat_lo, qpf_24h, pop_24h)
 t_lbl, t_clr, t_bg = threat_meta(threat)
 
 lo_depth, lo_flow = model_stream(
@@ -1457,9 +1767,6 @@ if hwo_text:
     _hwo_clr    = "#FFB066"
     _hwo_sub    = "#FFE0C2"
 
-    # Build inner HTML for each paragraph section.
-    # Body text is already HTML-escaped by the fetch function;
-    # convert newlines to <br> for proper rendering.
     _para_html = ""
     for para in hwo_text["paragraphs"]:
         if para["header"]:
@@ -1498,13 +1805,12 @@ if hwo_text:
 
 
 # ── PANEL 2: ATMOSPHERIC CONDITIONS ──────────────────────────────────────────
-# 7-day rainfall color: green → yellow → orange → red keyed to SCS AMC thresholds
 _r7_clr = ("#FF3333" if rain_7d > 5.0 else
            "#FF8800" if rain_7d > 3.0 else
            "#FFD700" if rain_7d > 1.5 else "#00FF9C")
 
-# Source label: station data if live, otherwise HRRR best match fallback
-_r7_src = f"{station_rain['count']} PWS + HRRR" if station_rain.get("ok") else "HRRR BEST MATCH"
+# Data quality badge — shows which tier of the precip chain is active
+_src_label, _src_color = _precip_source_badge(station_rain, backup_hist)
 
 st.markdown('<div class="panel"><div class="panel-title">ATMOSPHERIC CONDITIONS</div>', unsafe_allow_html=True)
 c1, c2, c3, c4 = st.columns(4)
@@ -1516,6 +1822,18 @@ with c3:
     st.plotly_chart(make_dial(display_rain_now, "RAIN NOW", 0, 4, '" / hr', "#0077FF"), use_container_width=True)
 with c4:
     st.plotly_chart(make_dial(rain_7d, "RAIN (7-DAY)", 0, 10, '"', _r7_clr), use_container_width=True)
+    st.markdown(
+        f'<div style="text-align:center; font-family:\'Share Tech Mono\',monospace;'
+        f' font-size:0.65em; color:{_src_color}; letter-spacing:1px; margin-top:-8px;">'
+        f'&#x1F4E1; {_src_label}</div>',
+        unsafe_allow_html=True
+    )
+st.markdown(
+    f'<div style="font-family:\'Share Tech Mono\',monospace; font-size:0.62em;'
+    f' color:#3A5A6A; text-align:right; margin-top:2px; padding-right:4px;">'
+    f'PRECIP SOURCES: {" &middot; ".join(backup_hist.get("sources", [_src_label]))}</div>',
+    unsafe_allow_html=True
+)
 st.markdown('</div>', unsafe_allow_html=True)
 
 
