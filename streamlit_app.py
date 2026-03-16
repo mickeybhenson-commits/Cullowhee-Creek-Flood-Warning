@@ -419,10 +419,16 @@ def _fetch_nws_k24a() -> dict:
         r7     = _sp(pairs, 168)
         prcp_ok = not (n_obs >= 12 and r7 == 0.0)
 
+        # Most recent single observation — use as rain rate proxy even if
+        # slightly older than 1h (AWOS reports every 20-60 min).
+        # Capped at 2h age to avoid showing stale readings as "now".
+        _recent = next(((age, p) for age, p in pairs if age <= 2.0), None)
+        _recent_rate = round(_recent[1], 3) if _recent else 0.0
+
         return {
             "ok":              True,
             "source":          "NWS-K24A",
-            "rain_rate_in_hr": _sp(pairs, 1),
+            "rain_rate_in_hr": _recent_rate,   # most recent obs ≤2h old
             "rain_1h_in":      _sp(pairs, 1)   if prcp_ok else None,
             "rain_24h_in":     _sp(pairs, 24)  if prcp_ok else None,
             "rain_3d_in":      _sp(pairs, 72)  if prcp_ok else None,
@@ -1339,12 +1345,27 @@ if station_rain.get("ok"):
     rain_24h  = station_rain.get("rain_24h_in")  or backup_rain["rain_24h_in"]
     rain_5d   = station_rain.get("rain_5d_in")   or backup_rain["rain_5d_in"]
     rain_7d   = station_rain.get("rain_7d_in")   or backup_rain["rain_7d_in"]
-    rain_now  = station_rain.get("rain_rate_in_hr") or conditions["precip"]
 else:
     rain_24h  = backup_rain["rain_24h_in"]
     rain_5d   = backup_rain["rain_5d_in"]
     rain_7d   = backup_rain["rain_7d_in"]
-    rain_now  = backup_rain.get("rain_rate_in_hr") or conditions["precip"]
+
+# RAIN NOW: take the maximum across all available sources.
+# Avoids false zero when any single source misses the event.
+# Sources:
+#   rain_rate_in_hr  — live sensor rate (when deployed)
+#   rain_1h_in       — observed last-hour total (K24A/ASOS accumulation)
+#   conditions[precip]— Open-Meteo model last-hour precip (lagged but continuous)
+# Note: or-logic fails when value is 0.0 (falsy). Use max() instead.
+_candidates = [
+    station_rain.get("rain_rate_in_hr"),       # Tier 1 live sensor
+    station_rain.get("rain_1h_in"),            # Tier 1 live 1h total
+    backup_rain.get("rain_rate_in_hr"),        # K24A/ASOS rate proxy
+    backup_rain.get("rain_1h_in"),             # K24A/ASOS 1h observed
+    conditions["precip"],                       # Open-Meteo model 1h precip
+]
+rain_now = max((v for v in _candidates if v is not None), default=0.0)
+rain_now = round(rain_now, 3)
 
 soil_sat, soil_stored, soil_color = calc_soil_sat_ensemble(
     sm_07, sm_728, sm_ok, rain_5d, usdm_level)
@@ -1543,7 +1564,7 @@ with c1:
 with c2:
     st.plotly_chart(make_dial(conditions["temp"], "TEMPERATURE",  0, 110, " F",   "#FF3333"), use_container_width=True)
 with c3:
-    st.plotly_chart(make_dial(rain_now,           "RAIN NOW",     0, 4,   '" / hr',"#0077FF"), use_container_width=True)
+    st.plotly_chart(make_dial(rain_now,           "RAIN (1-HR)",  0, 3,   '"',"#0077FF"), use_container_width=True)
 with c4:
     st.plotly_chart(make_dial(rain_7d,            "RAIN (7-DAY)", 0, 10,  '"',    _r7_clr),   use_container_width=True)
     st.markdown(
