@@ -62,6 +62,15 @@ REALTIME_RAIN_STATIONS = [
 # AVL = Asheville Regional (~35 mi, reliable fallback)
 ASOS_STATIONS = ["24A", "RHP", "AVL"]
 
+# Module-level alert severity rank (mirrors fetch_active_alerts sort logic)
+# Used in render section to split Warnings/Watches from Advisories/Statements
+ALERT_RANK = {
+    "flash flood warning": 5, "flood warning": 5, "tornado warning": 5,
+    "severe thunderstorm warning": 4,
+    "flash flood watch": 3, "flood watch": 3,
+    "wind advisory": 2, "flood advisory": 2, "special weather statement": 1,
+}
+
 # ── Watershed constants ───────────────────────────────────────────────────────
 # ── Southern Blue Ridge soil hydraulic properties ────────────────────────────
 # Source: SSURGO Map Units for Jackson County NC (FIPS 37099)
@@ -921,7 +930,7 @@ def fetch_active_alerts():
     except Exception:
         return []
 
-@st.cache_data(ttl=900)
+@st.cache_data(ttl=300)   # match active alerts — NWS can update HWO during evolving events
 def fetch_hwo():
     import re
     from html import escape as he
@@ -1514,10 +1523,16 @@ st.markdown(f"""
   </div>
 </div>""", unsafe_allow_html=True)
 
-# ── PANEL 1B: ACTIVE ALERTS ───────────────────────────────────────────────────
-if active_alerts:
-    st.markdown('<div class="panel"><div class="panel-title">ACTIVE WEATHER ALERTS</div>', unsafe_allow_html=True)
-    for a in active_alerts:
+# ── PANEL 1B: WARNINGS & WATCHES (rank >= 3 only) ───────────────────────────
+# Advisories and statements (rank <= 2) are grouped with the HWO panel below.
+_severe_alerts    = [a for a in active_alerts
+                     if ALERT_RANK.get(a["event"].lower(), 0) >= 3]
+_advisory_alerts  = [a for a in active_alerts
+                     if ALERT_RANK.get(a["event"].lower(), 0) in (1, 2)]
+
+if _severe_alerts:
+    st.markdown('<div class="panel"><div class="panel-title">ACTIVE WARNINGS &amp; WATCHES</div>', unsafe_allow_html=True)
+    for a in _severe_alerts:
         sty  = _alert_style(a["event"])
         summ = a["headline"] if a["headline"] else a["description"]
         if len(summ) > 220: summ = summ[:217] + "..."
@@ -1532,27 +1547,55 @@ if active_alerts:
 </div>""", unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ── PANEL 1C: HWO ─────────────────────────────────────────────────────────────
-if hwo_text:
+# ── PANEL 1C: NWS SITUATIONAL AWARENESS — advisories + HWO ──────────────────
+# Wind Advisories, Flood Advisories, Special Statements, and the HWO are all
+# NWS "heads up" products. They belong together. Warnings/Watches (rank≥3)
+# are above in Panel 1B. This panel is the forecaster narrative context.
+if hwo_text or _advisory_alerts:
     _ph = ""
-    for para in hwo_text["paragraphs"]:
-        if para["header"]:
-            _ph += (f'<div style="font-family:\'Share Tech Mono\',monospace;font-size:0.72em;'
-                    f'color:#FFB066;letter-spacing:2px;margin:14px 0 5px;">{para["header"]}</div>')
-        _ph += (f'<div style="font-size:1.0em;color:#FFE0C2;line-height:1.65;margin-bottom:4px;">'
-                f'{para["body"].replace(chr(10)+chr(10),"<br><br>").replace(chr(10)," ")}</div>')
+
+    # Advisories and statements pinned at the top of the HWO panel
+    for a in _advisory_alerts:
+        sty  = _alert_style(a["event"])
+        summ = a["headline"] if a["headline"] else a["description"]
+        if len(summ) > 220: summ = summ[:217] + "..."
+        _ph += f"""
+<div style="background:{sty['bg']};border-left:4px solid {sty['border']};
+            border-radius:6px;padding:10px 14px;margin-bottom:12px;">
+  <div style="font-family:'Share Tech Mono',monospace;font-size:0.75em;
+              color:{sty['title']};letter-spacing:2px;margin-bottom:4px;">{a['event'].upper()}</div>
+  <div style="font-size:0.88em;color:{sty['text']};line-height:1.4;">{summ}</div>
+  <div style="font-family:'Share Tech Mono',monospace;font-size:0.63em;color:#7AACCC;margin-top:6px;">
+    {"Until " + a["expires_local"] if a["expires_local"] else ""}</div>
+</div>"""
+
+    # Divider between advisories and HWO prose (only if both present)
+    if _advisory_alerts and hwo_text:
+        _ph += '<div style="border-top:1px solid rgba(255,136,0,0.20);margin:14px 0;"></div>'
+
+    # HWO prose sections
+    if hwo_text:
+        for para in hwo_text["paragraphs"]:
+            if para["header"]:
+                _ph += (f'<div style="font-family:\'Share Tech Mono\',monospace;font-size:0.72em;'
+                        f'color:#FFB066;letter-spacing:2px;margin:14px 0 5px;">{para["header"]}</div>')
+            _ph += (f'<div style="font-size:1.0em;color:#FFE0C2;line-height:1.65;margin-bottom:4px;">'
+                    f'{para["body"].replace(chr(10)+chr(10),"<br><br>").replace(chr(10)," ")}</div>')
+
+    _issued_line = (f'NWS GREENVILLE-SPARTANBURG (GSP) &nbsp;&middot;&nbsp; JACKSON COUNTY, NC'
+                    f'&nbsp;&middot;&nbsp; ISSUED: {hwo_text["issued"]}') if hwo_text else                    'NWS GREENVILLE-SPARTANBURG (GSP) &nbsp;&middot;&nbsp; JACKSON COUNTY, NC'
+
     st.markdown(f"""
 <div style="background:rgba(255,136,0,0.07);border:2px solid #FF8800;border-radius:10px;
             padding:20px 28px;margin-bottom:16px;">
   <div style="font-family:'Share Tech Mono',monospace;font-size:0.72em;color:#FFB066;
-              letter-spacing:4px;margin-bottom:6px;text-align:center;">NWS ACTIVE PRODUCT</div>
+              letter-spacing:4px;margin-bottom:6px;text-align:center;">NWS ACTIVE PRODUCTS</div>
   <div style="font-size:3.0em;font-weight:700;color:#FFB066;letter-spacing:4px;
               line-height:1.0;text-align:center;margin-bottom:12px;">HAZARDOUS WEATHER OUTLOOK</div>
   <div style="font-family:'Share Tech Mono',monospace;font-size:0.65em;color:#7AACCC;
               letter-spacing:1px;margin-bottom:14px;text-align:center;
               border-bottom:1px solid rgba(255,136,0,0.25);padding-bottom:10px;">
-    NWS GREENVILLE-SPARTANBURG (GSP) &nbsp;&middot;&nbsp; JACKSON COUNTY, NC
-    &nbsp;&middot;&nbsp; ISSUED: {hwo_text['issued']}</div>
+    {_issued_line}</div>
   {_ph}
 </div>""", unsafe_allow_html=True)
 
