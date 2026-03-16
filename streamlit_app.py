@@ -1567,16 +1567,6 @@ with c3:
     st.plotly_chart(make_dial(rain_now,           "RAIN (1-HR)",  0, 3,   '"',"#0077FF"), use_container_width=True)
 with c4:
     st.plotly_chart(make_dial(rain_7d,            "RAIN (7-DAY)", 0, 10,  '"',    _r7_clr),   use_container_width=True)
-    st.markdown(
-        f'<div style="text-align:center;font-family:\'Share Tech Mono\',monospace;'
-        f'font-size:0.65em;color:{_src_color};letter-spacing:1px;margin-top:-8px;">'
-        f'&#x1F4E1; {_src_label}</div>',
-        unsafe_allow_html=True)
-st.markdown(
-    f'<div style="font-family:\'Share Tech Mono\',monospace;font-size:0.62em;color:#3A5A6A;'
-    f'text-align:right;margin-top:2px;padding-right:4px;">'
-    f'SOURCES: {" &middot; ".join(backup_rain.get("sources",[_src_label]))}</div>',
-    unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ── PANEL 3: UPPER WATERSHED ─────────────────────────────────────────────────
