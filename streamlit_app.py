@@ -1349,12 +1349,47 @@ else:
 soil_sat, soil_stored, soil_color = calc_soil_sat_ensemble(
     sm_07, sm_728, sm_ok, rain_5d, usdm_level)
 
-# Both sub-basins receive the same antecedent soil saturation estimate.
-# TR-55 already handles sub-basin hydrologic differences through separate
-# CN values (LO_CN_II=68 vs UP_CN_II=62) and Tc (2.5h vs 1.2h).
-# Applying an additional scalar correction on top is double-counting.
+# ── Sub-basin soil saturation: state-aware modifier ─────────────────────────
+# ERA5/Open-Meteo returns a single 9km grid cell — both sub-basins see the
+# same raw model output. However, three physical factors create real differences:
+#
+#   1. Drainage speed: upper Tc=1.2h vs lower Tc=2.5h → upper drains 2x faster
+#      Between storms: upper is LESS saturated (dries out faster)
+#      During active storms: upper saturates FASTER (fills sooner)
+#
+#   2. Orographic precipitation: upper centroid ~3500 ft vs lower ~2700 ft
+#      Southern Blue Ridge receives ~7%/1000ft more rain at elevation.
+#      Upper basin sees ~5-6% more precipitation for any given event.
+#
+#   3. Soil depth: ridge soils ~18 in vs valley soils ~36 in — upper fills
+#      to capacity at roughly half the cumulative rain input of the lower.
+#
+# Solution: a storm-state modifier that transitions based on rain_24h:
+#   - Dry antecedent (rain_24h → 0):   upper = lower × 0.88  (drains faster)
+#   - Active storm  (rain_24h ≥ 1.5"): upper = lower × 1.08  (saturates faster)
+#   The old _UP_DRAIN factor (0.78 constant) was wrong — it always suppressed
+#   upper saturation even during active storms, which is physically backwards.
+#
+# Additionally apply orographic rainfall enhancement to rain_5d for upper basin.
+
+_oro_factor   = 1.056   # +5.6% precip at upper centroid (~800 ft higher)
+_rain_5d_up   = round(min(rain_5d * _oro_factor, 15.0), 3)
+_rain_24h_up  = round(min(rain_24h * _oro_factor, 20.0), 3)
+
+# Storm-state saturation modifier: transitions 0.88 → 1.08 over 0–1.5" of 24h rain
+_storm_pct    = min(1.0, rain_24h / 1.5)
+_sat_modifier = 0.88 + _storm_pct * 0.20   # 0.88 dry → 1.08 active storm
+
 soil_sat_lo = soil_sat
-soil_sat_up = soil_sat   # identical input; model output diverges via CN/Tc
+soil_sat_up = round(min(100.0, max(1.0, soil_sat * _sat_modifier)), 1)
+
+# Recalculate stored water for upper basin using orographic-enhanced rain
+_soil_sat_up_raw, _, _ = calc_soil_sat_ensemble(
+    sm_07, sm_728, sm_ok, _rain_5d_up, usdm_level)
+# Blend: 50% ERA5-based (orographic), 50% modifier-based (drainage speed)
+soil_sat_up = round(min(100.0, max(1.0,
+    0.50 * _soil_sat_up_raw * _sat_modifier +
+    0.50 * soil_sat * _sat_modifier)), 1)
 
 def _sc(s): return "#FF3333" if s>85 else "#FF8800" if s>70 else "#FFD700" if s>50 else "#00FF9C"
 def _ss(s): return round((s/100.0)*(SOIL_POROSITY*11.024), 2)
@@ -1375,7 +1410,8 @@ t_lbl, t_clr, t_bg = threat_meta(threat)
 
 lo_depth, lo_flow = model_stream(soil_sat_lo, rain_24h, qpf_24h, rain_7d,
     LO_DA_SQMI, LO_TC_HRS, LO_CN_II, LO_BASEFLOW, LO_RATING_A, LO_RATING_B, LO_BANKFULL_Q)
-up_depth, up_flow = model_stream(soil_sat_up, rain_24h, qpf_24h, rain_7d,
+# Upper basin uses orographic-enhanced rainfall inputs
+up_depth, up_flow = model_stream(soil_sat_up, _rain_24h_up, qpf_6h, _rain_5d_up,
     UP_DA_SQMI, UP_TC_HRS, UP_CN_II, UP_BASEFLOW, UP_RATING_A, UP_RATING_B, UP_BANKFULL_Q)
 
 for k,v in [("lo_depth",lo_depth),("lo_flow",lo_flow),
