@@ -3,12 +3,18 @@ NOAH: Cullowhee Creek Flood Warning Dashboard
 Nautilus Technologies — Jackson County, NC — Watershed Monitoring System
 
 Precipitation source chain (priority order):
-  1.  Live sensor array     custom_json / weathercom_pws  (deploy target)
-  1.5 Ambient Weather PWS   rt.ambientweather.net API     (~1 min lag)
-  2.  Iowa Mesonet ASOS     KRHP / KAND / KAVL            (~5 min lag, no key)
-  3.  Open-Meteo forecast   best_match w/ past_days       (~1 hr lag,  no key)
-  4.  NWS grid QPE          forecastGridData reuse        (~15 min lag, no key)
-  5.  ERA5 archive          last resort                   (1-2 day lag, no key)
+  1.  Live sensor array          custom_json / weathercom_pws  (deploy target)
+  1.5 Ambient Weather Network    RiverBend on the Tuckasegee, Sylva NC
+  2.  NWS K24A Observed          Jackson County Airport AWOS III P/T
+  3.  Iowa Mesonet ASOS          24A / RHP / AVL
+  4.  Open-Meteo forecast        best_match w/ past_days
+  5.  NWS grid QPE               forecastGridData reuse
+  6.  ERA5 archive               last resort  (1-2 day lag)
+
+AWN SETUP (two keys required):
+  .streamlit/secrets.toml:
+    AWN_APP_KEY = "your_application_key"   # register free at ambientweather.net/account/create-app
+    AWN_API_KEY = "your_account_api_key"   # regenerate at ambientweather.net/account
 """
 
 import math
@@ -26,6 +32,7 @@ from streamlit_autorefresh import st_autorefresh
 
 log = logging.getLogger("NOAH.precip")
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  1. CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -33,37 +40,33 @@ log = logging.getLogger("NOAH.precip")
 st.set_page_config(page_title="NOAH: Cullowhee Flood Warning", layout="wide")
 st_autorefresh(interval=30000, key="refresh")
 
-LAT, LON = 35.3079, -83.1746
-ET_TZ    = ZoneInfo("America/New_York")
-UTC_TZ   = ZoneInfo("UTC")
+LAT, LON    = 35.3079, -83.1746
+ET_TZ       = ZoneInfo("America/New_York")
+UTC_TZ      = ZoneInfo("UTC")
 REQ_TIMEOUT = 12
 
-# ── Tier 1: deployed sensor endpoints (fill when sensors are live) ────────────
+# ── Tier 1: deployed sensor endpoints (fill when sensors are live) ─────────────
 REALTIME_RAIN_STATIONS = [
     {"name": "Primary Basin Rain",   "type": "custom_json",    "weight": 1.0,
      "current_url": "", "history_url": ""},
     {"name": "Secondary Basin Rain", "type": "custom_json",    "weight": 1.0,
      "current_url": "", "history_url": ""},
-    {"name": "Cullowhee PWS",        "type": "weathercom_pws", "weight": 1.0,
-     "station_id": "KNCCULLO7",  "api_key": ""},
-    {"name": "Sylva PWS",            "type": "weathercom_pws", "weight": 1.0,
-     "station_id": "KNCSYLVA86", "api_key": ""},
 ]
 
-# ── Tier 1.5: NWS Observed Data — Jackson County Airport K24A ────────────────
-# Official AWOS III P/T observations, ~1 mile from WCU/watershed.
-# Same api.weather.gov endpoint NOAH already uses for alerts — no key needed.
-# Hourly precip measured directly, updated every 20 min. Most authoritative
-# local observed precip available without any credentials.
+# ── Tier 1.5: Ambient Weather Network — RiverBend on the Tuckasegee, Sylva NC ─
+AWN_API_KEY      = "4112bd1931ce4b7a9ba75da04c237db348c6f56e18dc4616966bd3e6474fac04"
+AWN_APP_KEY      = "df7991f317694d6480b4510c3ef81cb3d6082fe19abd4f629eff2c2f93443284"
+AWN_STATION_NAME = "riverbend"   # substring match on device name/location (case-insensitive)
+AWN_STATION_MAC  = ""            # leave blank — auto-discovered; or hardcode MAC here
 
-# ── Tier 2: AWOS/ASOS stations — Jackson County Airport primary ───────────────
-# 24A = Jackson County Airport, Cullowhee (~1 mi from WCU, AWOS III P/T w/ precip)
-# RHP = Andrews-Murphy Airport, Andrews NC (~18 mi, precip sensor unreliable)
+# ── Tier 2: NWS K24A — Jackson County Airport AWOS III P/T ────────────────────
+# ── Tier 3: Iowa Mesonet ASOS stations ────────────────────────────────────────
+# 24A = Jackson County Airport (~1 mi from WCU)
+# RHP = Andrews-Murphy Airport (~18 mi)
 # AVL = Asheville Regional (~35 mi, reliable fallback)
 ASOS_STATIONS = ["24A", "RHP", "AVL"]
 
-# Module-level alert severity rank (mirrors fetch_active_alerts sort logic)
-# Used in render section to split Warnings/Watches from Advisories/Statements
+# Alert severity rank
 ALERT_RANK = {
     "flash flood warning": 5, "flood warning": 5, "tornado warning": 5,
     "severe thunderstorm warning": 4,
@@ -71,59 +74,31 @@ ALERT_RANK = {
     "wind advisory": 2, "flood advisory": 2, "special weather statement": 1,
 }
 
-# ── Watershed constants ───────────────────────────────────────────────────────
-# ── Southern Blue Ridge soil hydraulic properties ────────────────────────────
-# Source: SSURGO Map Units for Jackson County NC (FIPS 37099)
-# Dominant series in Cullowhee Creek watershed:
-#   Evard-Cowee complex (45%) — fine-loamy, mixed, mesic Typic Hapludults
-#   Tuckasegee (20%)          — fine-loamy, mixed, mesic Fluventic Humudepts
-#   Saunook (15%)             — fine-loamy, mixed, mesic Humic Hapludults
-#   Codorus-Rosman (10%)      — floodplain Inceptisols / Entisols
-#
-# Values are depth-weighted averages for 0-28 cm profile (top two ERA5 layers)
-# SSURGO Ksat, theta_s, theta_fc, theta_wp from Web Soil Survey bulk query.
-# These replace the prior generic loam values which underestimated porosity.
-SOIL_POROSITY  = 0.485   # theta_s  — saturated VWC (m³/m³); SSURGO wtd avg
-SOIL_FIELD_CAP = 0.310   # theta_fc — field capacity; ~33 kPa matric potential
-SOIL_WILT_PT   = 0.138   # theta_wp — wilting point; ~1500 kPa matric potential
-# Available water capacity: 0.310 - 0.138 = 0.172 m³/m³  (SSURGO: 0.16-0.19)
-# Total pore space in 0-28 cm profile: 0.485 × 11.024 in = 5.35 in
+# ── Watershed / soil constants ─────────────────────────────────────────────────
+# SSURGO Jackson County NC — Evard-Cowee/Tuckasegee/Saunook/Codorus weighted avg
+SOIL_POROSITY  = 0.485
+SOIL_FIELD_CAP = 0.310
+SOIL_WILT_PT   = 0.138
 
-# ── Hydraulic geometry — Henson et al. (2014) Ecoregion 66 regional curves ────
-# Qbkf = 57.8 * DA^0.779   Dbkf = 1.26 * DA^0.325
-# Rating curve: D = (Q / A)^(1/B)  →  A recomputed so D(Qbkf) = Dbkf exactly.
-# B exponents (channel shape) unchanged; option (c) — regional equations used
-# until site-specific cross-section surveys are available for Cullowhee Creek.
-# ── Reference gage: USGS 03508050 Tuckasegee River at SR 1172 nr Cullowhee ────
-# DA=147 sq mi, elevation 2111 ft. No gage exists on Cullowhee Creek itself.
-# Baseflow derived by drainage-area ratio scaling from Tuckasegee 25th-pctile
-# low-flow discharge (234 cfs / 147 sq mi = 1.592 cfs/sq mi).
-# Recession coefficient K=0.046/day from USGS StreamStats NC Blue Ridge RI=50d.
-USGS_TUCK_SITE  = "03508050"   # live reference gage — added to NOAH display
-USGS_TUCK_DA    = 147.0        # sq mi
+# Henson et al. (2014) Ecoregion 66 regional hydraulic geometry curves
+# USGS 03508050 Tuckasegee River at SR 1172 nr Cullowhee — DA=147 sq mi
+USGS_TUCK_SITE = "03508050"
+USGS_TUCK_DA   = 147.0
 
-# CN values: NLCD 2019 land cover × SSURGO HSG C (Evard-Cowee Ultisols)
-#   Lower: 73% forest(C=70) + 15% pasture(C=79) + 8% developed(C=85) + 4% water = 73.7→72
-#   Upper: 85% forest(C=70) + 10% pasture(C=79) + 4% developed(C=85) + 1% water = 71.8→70
-#   Prior values (68/62) underestimated runoff by assuming HSG B soils.
-# Tc values from TR-55 velocity method for forested mountain channel (0.58 ft/s):
-#   Consistent with stored values — keeping 2.5h / 1.2h.
-LO_AREA_ACRES = 6200;  LO_DA_SQMI = 9.688;  LO_TC_HRS = 2.5;   LO_CN_II = 72
-LO_RATING_A   = 36.4;  LO_RATING_B = 2.30;  LO_BASEFLOW = 15.4  # 1.592 * 9.688
-LO_BANKFULL   = 2.64;  LO_BANKFULL_Q = 339.0   # Henson 2014: 57.8*9.688^0.779
+# CN: NLCD 2019 × SSURGO HSG C (Evard-Cowee Ultisols)
+# Tc: TR-55 velocity method, forested mountain channel
+LO_AREA_ACRES = 6200;  LO_DA_SQMI = 9.688;  LO_TC_HRS = 2.5;  LO_CN_II = 72
+LO_RATING_A   = 36.4;  LO_RATING_B = 2.30;  LO_BASEFLOW = 15.4
+LO_BANKFULL   = 2.64;  LO_BANKFULL_Q = 339.0
 
-UP_AREA_ACRES = 2480;  UP_DA_SQMI = 3.875;  UP_TC_HRS = 1.2;   UP_CN_II = 70
-UP_RATING_A   = 39.1;  UP_RATING_B = 2.15;  UP_BASEFLOW = 6.2   # 1.592 * 3.875
-UP_BANKFULL   = 1.96;  UP_BANKFULL_Q = 166.0   # Henson 2014: 57.8*3.875^0.779
+UP_AREA_ACRES = 2480;  UP_DA_SQMI = 3.875;  UP_TC_HRS = 1.2;  UP_CN_II = 70
+UP_RATING_A   = 39.1;  UP_RATING_B = 2.15;  UP_BASEFLOW = 6.2
+UP_BANKFULL   = 1.96;  UP_BANKFULL_Q = 166.0
 
-RECESSION_K     = 0.046   # per day — USGS StreamStats NC Blue Ridge RI=50d
-
+RECESSION_K      = 0.046   # /day — USGS StreamStats NC Blue Ridge RI=50d
 FLOOD_TRAVEL_MIN = 65
 
 _USDM_IMPLIED_SAT = {1: 55.0, 2: 40.0, 3: 27.0, 4: 17.0, 5: 8.0}
-# _USDM_CEILING removed — was incorrectly hard-capping saturation during
-# active storms. USDM drought classifications reflect prior-week conditions
-# and must not suppress soil saturation estimates during flood events.
 
 _TR55_IAPRATIO = [0.10, 0.20, 0.30, 0.35, 0.40, 0.45, 0.50]
 _TR55_C0 = [2.55323, 2.23537, 2.10304, 2.18219, 2.17339, 2.16251, 2.14583]
@@ -194,9 +169,9 @@ def _fetch_short_range_hourly():
             try:
                 ts = datetime.fromisoformat(t).replace(tzinfo=UTC_TZ).astimezone(ET_TZ)
                 out.append({"time": ts,
-                            "temp_f":   float(r["hourly"]["temperature_2m"][i] or 0),
-                            "qpf_in":   float(r["hourly"]["precipitation"][i]   or 0),
-                            "pop":      float((r["hourly"].get("precipitation_probability") or [0]*len(r["hourly"]["time"]))[i] or 0),
+                            "temp_f":  float(r["hourly"]["temperature_2m"][i] or 0),
+                            "qpf_in":  float(r["hourly"]["precipitation"][i]  or 0),
+                            "pop":     float((r["hourly"].get("precipitation_probability") or [0]*len(r["hourly"]["time"]))[i] or 0),
                             "icon_txt": ""})
             except Exception:
                 continue
@@ -267,13 +242,7 @@ def _fetch_daily_forecast():
         return []
 
 def _qpf_next_hours(n_hours=6):
-    """
-    Sum QPF for the next n_hours from the hourly forecast.
-    This avoids double-counting rainfall already observed in rain_24h.
-    TR-55 needs only the REMAINING storm precipitation for the forecast
-    horizon, not the full 24h QPF window which overwraps observed rain.
-    Returns inches.
-    """
+    """Sum QPF for the next n_hours only — avoids double-counting observed rain."""
     hourly = _fetch_short_range_hourly()
     now_et = datetime.now(ET_TZ)
     total  = 0.0
@@ -282,7 +251,6 @@ def _qpf_next_hours(n_hours=6):
         if 0 < lead <= n_hours:
             total += float(r["qpf_in"] or 0.0)
     return round(total, 3)
-
 
 def _build_unified_forecast():
     now_et = datetime.now(ET_TZ)
@@ -345,36 +313,187 @@ def _sp(pairs, max_age_hr):
     return round(sum(p for a, p in pairs if 0 <= a <= max_age_hr), 3)
 
 
-# ── Tier 1.5: NWS K24A Observed Hourly Precip (~20 min lag, no key) ──────────
+# ── Tier 1.5: Ambient Weather Network — RiverBend on the Tuckasegee ──────────
 
-@st.cache_data(ttl=1200)   # 20-min cache matches AWOS update cadence
+@st.cache_data(ttl=60)   # AWN updates every ~1 min
+def _fetch_ambient_weather() -> dict:
+    """
+    Ambient Weather Network subscription API — RiverBend on the Tuckasegee, Sylva NC.
+
+    AWN REST API v1 requires TWO keys:
+      applicationKey — registered app at ambientweather.net/account/create-app
+      apiKey         — your account API key at ambientweather.net/account
+
+    Step 1: GET /v1/devices       → discover MAC address for AWN_STATION_NAME
+    Step 2: GET /v1/devices/{mac} → pull last 288 records (~24h at 5-min intervals)
+
+    Key AWN fields used:
+      hourlyrainin   — current rain rate (in/hr) — RATE not accumulation
+      dailyrainin    — rain since midnight local
+      weeklyrainin   — rolling 7-day accumulation
+      eventrainin    — rain this event
+      tempf, humidity, windspeedmph, windgustmph, baromrelin
+
+    Rate → accumulation: each 5-min record spans 1/12 hr,
+    so interval_in = hourlyrainin / 12.0
+    """
+    if not AWN_API_KEY:
+        log.warning("AWN_API_KEY not set — skipping AWN")
+        return {"ok": False, "source": "AWN-no-api-key"}
+
+    # Build params — include app key only if available
+    base_params = {"apiKey": AWN_API_KEY}
+    if AWN_APP_KEY:
+        base_params["applicationKey"] = AWN_APP_KEY
+    hdrs        = {"User-Agent": "NOAH-FloodWarning/1.0 (Nautilus Technologies)"}
+
+    # ── Step 1: discover device list and locate RiverBend station ────────────
+    try:
+        resp    = requests.get("https://api.ambientweather.net/v1/devices",
+                               params=base_params, headers=hdrs, timeout=REQ_TIMEOUT)
+        resp.raise_for_status()
+        devices = resp.json()
+    except Exception as exc:
+        log.error("AWN device list request failed: %s", exc)
+        return {"ok": False, "source": "AWN-device-list-failed", "reason": str(exc)}
+
+    if not isinstance(devices, list) or not devices:
+        return {"ok": False, "source": "AWN-empty-device-list"}
+
+    # Locate MAC for RiverBend — match on name OR location field
+    mac       = AWN_STATION_MAC
+    last_data = {}
+    if not mac:
+        for dev in devices:
+            info     = dev.get("info", {})
+            name_str = str(info.get("name", "") or "").lower()
+            loc_str  = str(info.get("location", "") or "").lower()
+            if AWN_STATION_NAME.lower() in name_str or AWN_STATION_NAME.lower() in loc_str:
+                mac       = dev.get("macAddress", "")
+                last_data = dev.get("lastData", {})
+                break
+        # Fallback: single-device account — use first device
+        if not mac and len(devices) == 1:
+            mac       = devices[0].get("macAddress", "")
+            last_data = devices[0].get("lastData", {})
+            log.info("AWN: using sole registered device MAC=%s", mac)
+        if not mac:
+            names = [d.get("info", {}).get("name", "?") for d in devices]
+            log.warning("AWN: no station matching '%s' in %s", AWN_STATION_NAME, names)
+            return {"ok": False, "source": "AWN-station-not-found",
+                    "reason": f"Searched for '{AWN_STATION_NAME}' in {names}"}
+    else:
+        # MAC was hardcoded — pull lastData from device list if available
+        for dev in devices:
+            if dev.get("macAddress") == mac:
+                last_data = dev.get("lastData", {})
+                break
+
+    # ── Step 2: pull historical records for sliding-window totals ─────────────
+    # limit=288: 288 × 5-min intervals = 24 hours of high-resolution records
+    # For 7-day totals we rely on AWN's own weeklyrainin field (cross-check below)
+    try:
+        hist_resp = requests.get(
+            f"https://api.ambientweather.net/v1/devices/{mac}",
+            params={**base_params, "limit": 288},
+            headers=hdrs, timeout=REQ_TIMEOUT
+        )
+        hist_resp.raise_for_status()
+        hist = hist_resp.json()
+    except Exception as exc:
+        log.error("AWN history fetch failed for MAC %s: %s", mac, exc)
+        # Fall back to lastData only — less precise but still useful
+        hist = []
+
+    # ── Build sliding-window precipitation totals ─────────────────────────────
+    now_et = datetime.now(ET_TZ)
+    pairs  = []   # (age_hr, precip_in_per_5min_interval)
+
+    for rec in (hist if isinstance(hist, list) else []):
+        epoch_ms = rec.get("dateutc")
+        if epoch_ms is None:
+            continue
+        try:
+            ts_et  = datetime.fromtimestamp(int(epoch_ms) / 1000,
+                                            tz=UTC_TZ).astimezone(ET_TZ)
+            age_hr = (now_et - ts_et).total_seconds() / 3600.0
+            if age_hr < 0:
+                continue
+        except Exception:
+            continue
+        # AWN hourlyrainin is a RATE (in/hr) — convert to 5-min accumulation
+        rate = _cp(rec.get("hourlyrainin"), 0, 15)
+        if rate is not None:
+            pairs.append((age_hr, rate / 12.0))
+
+    # Quality gate: if we have records and all are zero, sensor may be offline
+    n_obs   = len(pairs)
+    r7_hist = _sp(pairs, 168) if pairs else 0.0
+    prcp_ok = not (n_obs >= 50 and r7_hist == 0.0)
+
+    # ── Extract current-conditions from lastData ───────────────────────────────
+    def _ld(key, lo=-9999, hi=9999):
+        return _cp(last_data.get(key), lo, hi)
+
+    _rate_now  = _ld("hourlyrainin",   0, 15)
+    _awn_daily = _ld("dailyrainin",    0, 30)   # since midnight local
+    _awn_week  = _ld("weeklyrainin",   0, 60)   # rolling 7-day
+    _awn_event = _ld("eventrainin",    0, 30)   # current event total
+
+    current = {
+        "tempf":        _ld("tempf",       -40, 130),
+        "humidity":     _ld("humidity",      0, 100),
+        "windspeedmph": _ld("windspeedmph",  0, 200),
+        "windgustmph":  _ld("windgustmph",   0, 200),
+        "baromrelin":   _ld("baromrelin",   20,  35),
+    }
+
+    # ── Build output: prefer AWN rolling totals, cross-check with history ─────
+    # Take MAX of computed history vs AWN's own rolling total (more reliable for
+    # longer windows where 288-record history doesn't reach)
+    _r1h  = _sp(pairs,  1) if prcp_ok else None
+    _r24h = _sp(pairs, 24) if prcp_ok else None
+    _r3d  = _sp(pairs, 72) if prcp_ok else None
+    _r7d  = r7_hist        if prcp_ok else None
+
+    # Cross-check AWN's own rolling totals
+    if _awn_daily is not None:
+        _r24h = max(_r24h, _awn_daily) if _r24h is not None else _awn_daily
+    if _awn_week is not None:
+        _r7d  = max(_r7d,  _awn_week)  if _r7d  is not None else _awn_week
+
+    return {
+        "ok":              True,
+        "source":          "AWN-RiverBend",
+        "mac":             mac,
+        "station":         "RiverBend on the Tuckasegee, Sylva NC",
+        "rain_rate_in_hr": _rate_now,
+        "rain_event_in":   _awn_event,
+        "rain_1h_in":      _r1h,
+        "rain_24h_in":     _r24h,
+        "rain_3d_in":      _r3d,
+        "rain_5d_in":      _sp(pairs, 120) if prcp_ok else None,
+        "rain_7d_in":      _r7d,
+        "rain_14d_in":     None,
+        "snow_7d_in":      None,
+        **{k: v for k, v in current.items() if v is not None},
+    }
+
+
+# ── Tier 2: NWS K24A Observed Hourly Precip ───────────────────────────────────
+
+@st.cache_data(ttl=1200)
 def _fetch_nws_k24a() -> dict:
     """
-    Pull up to 168 hourly observations from NWS station K24A
-    (Jackson County Airport, Cullowhee NC — AWOS III P/T with precip sensor).
-
-    Endpoint: GET https://api.weather.gov/stations/K24A/observations?limit=168
-    No authentication required. Same api.weather.gov domain NOAH already uses.
-
-    NWS observation fields:
-      precipitationLastHour   — mm measured in the past hour
-      precipitationLast3Hours — mm (reported at 3h synoptic times)
-      precipitationLast6Hours — mm (reported at 6h synoptic times)
-      temperature.value       — degrees C
-      windSpeed.value         — km/h
-      relativeHumidity.value  — %
-
-    Strategy: sum precipitationLastHour across sliding windows to build
-    rolling 1h / 24h / 3d / 5d / 7d totals. When 1h readings are null
-    (station didn't report that hour), we skip without penalising the sum.
+    Hourly observations from NWS K24A (Jackson County Airport, AWOS III P/T).
+    No authentication required. ~20-min update cadence.
     """
     try:
         hdrs = {"User-Agent": "NOAH-FloodWarning/1.0 (Nautilus Technologies)"}
         r    = requests.get(
             "https://api.weather.gov/stations/K24A/observations",
-            params={"limit": 288},   # 288 = ~12 days of hourly obs
-            headers=hdrs,
-            timeout=REQ_TIMEOUT,
+            params={"limit": 288},
+            headers=hdrs, timeout=REQ_TIMEOUT,
         ).json()
 
         features = r.get("features", [])
@@ -382,11 +501,11 @@ def _fetch_nws_k24a() -> dict:
             return {"ok": False, "source": "NWS-K24A", "reason": "no features"}
 
         now_et = datetime.now(ET_TZ)
-        pairs  = []   # (age_hr, precip_in)
+        pairs  = []
         latest = {}
 
         for feat in features:
-            props = feat.get("properties", {})
+            props  = feat.get("properties", {})
             ts_str = props.get("timestamp", "")
             if not ts_str:
                 continue
@@ -398,65 +517,54 @@ def _fetch_nws_k24a() -> dict:
             except Exception:
                 continue
 
-            # precipitationLastHour is the primary field; mm → inches
             p_mm = (props.get("precipitationLastHour") or {}).get("value")
             if p_mm is not None:
                 p_in = _cp(float(p_mm) * 0.0393701, 0, 5)
                 if p_in is not None:
                     pairs.append((age_hr, p_in))
 
-            # Grab latest atmospheric readings from most recent observation
             if not latest and age_hr < 2:
-                t_c   = (props.get("temperature")       or {}).get("value")
-                w_kph = (props.get("windSpeed")         or {}).get("value")
-                h_pct = (props.get("relativeHumidity")  or {}).get("value")
-                p_hpa = (props.get("seaLevelPressure")  or {}).get("value")
-                gust_kph = (props.get("windGust")       or {}).get("value")
-                latest = {
-                    "tempf":       round(float(t_c) * 9/5 + 32, 1) if t_c is not None else None,
-                    "windspeedmph":round(float(w_kph) * 0.621371, 1) if w_kph is not None else None,
-                    "windgustmph": round(float(gust_kph) * 0.621371, 1) if gust_kph is not None else None,
-                    "humidity":    round(float(h_pct), 1) if h_pct is not None else None,
-                    "baromrelin":  round(float(p_hpa) * 0.02953, 2) if p_hpa is not None else None,
+                t_c      = (props.get("temperature")      or {}).get("value")
+                w_kph    = (props.get("windSpeed")        or {}).get("value")
+                h_pct    = (props.get("relativeHumidity") or {}).get("value")
+                p_hpa    = (props.get("seaLevelPressure") or {}).get("value")
+                gust_kph = (props.get("windGust")         or {}).get("value")
+                latest   = {
+                    "tempf":        round(float(t_c) * 9/5 + 32, 1)      if t_c      is not None else None,
+                    "windspeedmph": round(float(w_kph) * 0.621371, 1)    if w_kph    is not None else None,
+                    "windgustmph":  round(float(gust_kph) * 0.621371, 1) if gust_kph is not None else None,
+                    "humidity":     round(float(h_pct), 1)                if h_pct    is not None else None,
+                    "baromrelin":   round(float(p_hpa) * 0.02953, 2)     if p_hpa    is not None else None,
                 }
 
         if not pairs:
             return {"ok": False, "source": "NWS-K24A", "reason": "no precip observations"}
 
-        # Quality gate: ≥12 obs with all zeros = sensor likely not reporting
-        n_obs  = len(pairs)
-        r7     = _sp(pairs, 168)
+        n_obs   = len(pairs)
+        r7      = _sp(pairs, 168)
         prcp_ok = not (n_obs >= 12 and r7 == 0.0)
 
-        # Most recent single observation — use as rain rate proxy even if
-        # slightly older than 1h (AWOS reports every 20-60 min).
-        # Capped at 2h age to avoid showing stale readings as "now".
-        _recent = next(((age, p) for age, p in pairs if age <= 2.0), None)
+        _recent      = next(((age, p) for age, p in pairs if age <= 2.0), None)
         _recent_rate = round(_recent[1], 3) if _recent else 0.0
 
         return {
             "ok":              True,
             "source":          "NWS-K24A",
-            "rain_rate_in_hr": _recent_rate,   # most recent obs ≤2h old
-            "rain_1h_in":      _sp(pairs, 1)   if prcp_ok else None,
-            "rain_24h_in":     _sp(pairs, 24)  if prcp_ok else None,
-            "rain_3d_in":      _sp(pairs, 72)  if prcp_ok else None,
-            "rain_5d_in":      _sp(pairs, 120) if prcp_ok else None,
-            "rain_7d_in":      r7              if prcp_ok else None,
+            "rain_rate_in_hr": _recent_rate,
+            "rain_1h_in":      _sp(pairs,  1)   if prcp_ok else None,
+            "rain_24h_in":     _sp(pairs, 24)   if prcp_ok else None,
+            "rain_3d_in":      _sp(pairs, 72)   if prcp_ok else None,
+            "rain_5d_in":      _sp(pairs, 120)  if prcp_ok else None,
+            "rain_7d_in":      r7               if prcp_ok else None,
             "rain_14d_in":     None,
             "snow_7d_in":      None,
-            **latest,
+            **{k: v for k, v in latest.items() if v is not None},
         }
     except Exception as exc:
         return {"ok": False, "source": "NWS-K24A", "reason": str(exc)}
 
 
-def _fetch_ambient_weather() -> dict:
-    """Thin wrapper — delegates to NWS K24A which replaced the AW approach."""
-    return _fetch_nws_k24a()
-
-
-# ── Tier 2: Iowa Mesonet ASOS (no key, ~5 min lag) ────────────────────────────
+# ── Tier 3: Iowa Mesonet ASOS ─────────────────────────────────────────────────
 
 @st.cache_data(ttl=300)
 def _fetch_asos(station="RHP"):
@@ -498,22 +606,17 @@ def _fetch_asos(station="RHP"):
                 continue
         if not pairs:
             return {"ok": False, "source": f"ASOS-{station}"}
-        # Quality gate: many small ASOS sites (e.g. RHP) have no rain gauge.
-        # If we have 50+ hourly rows and the entire 7-day total is still 0.0,
-        # the precip sensor is broken — return None so downstream sources win.
-        r7        = _sp(pairs, 168)
-        r24       = _sp(pairs, 24)
-        n_obs     = len(pairs)
-        prcp_ok   = not (n_obs >= 50 and r7 == 0.0)
+        r7      = _sp(pairs, 168)
+        n_obs   = len(pairs)
+        prcp_ok = not (n_obs >= 50 and r7 == 0.0)
         return {"ok": True, "source": f"ASOS-{station}",
                 "rain_rate_in_hr": None,
-                "rain_1h_in":  _sp(pairs, 1)   if prcp_ok else None,
-                "rain_24h_in": r24              if prcp_ok else None,
+                "rain_1h_in":  _sp(pairs,  1)  if prcp_ok else None,
+                "rain_24h_in": _sp(pairs, 24)  if prcp_ok else None,
                 "rain_3d_in":  _sp(pairs, 72)  if prcp_ok else None,
                 "rain_5d_in":  _sp(pairs, 120) if prcp_ok else None,
                 "rain_7d_in":  r7              if prcp_ok else None,
-                "rain_14d_in": None, "snow_7d_in": None,
-                "_prcp_ok": prcp_ok, "_n_obs": n_obs}
+                "rain_14d_in": None, "snow_7d_in": None}
     except Exception as exc:
         return {"ok": False, "source": f"ASOS-{station}", "reason": str(exc)}
 
@@ -525,7 +628,7 @@ def _fetch_asos_best():
     return {"ok": False, "source": "ASOS-all-failed"}
 
 
-# ── Tier 3: Open-Meteo forecast model w/ past_days (~1 hr lag) ────────────────
+# ── Tier 4: Open-Meteo forecast model w/ past_days ────────────────────────────
 
 @st.cache_data(ttl=600)
 def _fetch_openmeteo_recent():
@@ -560,7 +663,7 @@ def _fetch_openmeteo_recent():
             return {"ok": False, "source": "OpenMeteo-forecast"}
         return {"ok": True, "source": "OpenMeteo-forecast",
                 "rain_rate_in_hr": None,
-                "rain_1h_in":  _sp(pairs, 1),   "rain_24h_in": _sp(pairs, 24),
+                "rain_1h_in":  _sp(pairs,  1),  "rain_24h_in": _sp(pairs, 24),
                 "rain_3d_in":  _sp(pairs, 72),  "rain_5d_in":  _sp(pairs, 120),
                 "rain_7d_in":  _sp(pairs, 168), "rain_14d_in": _sp(pairs, 336),
                 "snow_7d_in":  _sp(snow_pairs, 168)}
@@ -568,7 +671,7 @@ def _fetch_openmeteo_recent():
         return {"ok": False, "source": "OpenMeteo-forecast", "reason": str(exc)}
 
 
-# ── Tier 4: NWS forecastGridData QPE (already fetched — free reuse) ───────────
+# ── Tier 5: NWS forecastGridData QPE (free reuse from daily forecast fetch) ───
 
 def _parse_nws_qpe(grid_props):
     try:
@@ -596,7 +699,7 @@ def _parse_nws_qpe(grid_props):
             return {"ok": False, "source": "NWS-grid-QPE"}
         return {"ok": True, "source": "NWS-grid-QPE",
                 "rain_rate_in_hr": None,
-                "rain_1h_in":  _sp(pairs, 1),   "rain_24h_in": _sp(pairs, 24),
+                "rain_1h_in":  _sp(pairs,  1),  "rain_24h_in": _sp(pairs, 24),
                 "rain_3d_in":  _sp(pairs, 72),  "rain_5d_in":  _sp(pairs, 120),
                 "rain_7d_in":  _sp(pairs, 168), "rain_14d_in": _sp(pairs, 336),
                 "snow_7d_in":  None}
@@ -604,7 +707,7 @@ def _parse_nws_qpe(grid_props):
         return {"ok": False, "source": "NWS-grid-QPE"}
 
 
-# ── Tier 5: ERA5 archive (last resort, 1-2 day lag) ───────────────────────────
+# ── Tier 6: ERA5 archive (last resort, 1-2 day lag) ───────────────────────────
 
 @st.cache_data(ttl=3600)
 def _fetch_era5():
@@ -640,7 +743,7 @@ def _fetch_era5():
             raise ValueError("empty")
         return {"ok": True, "source": "ERA5-archive",
                 "rain_rate_in_hr": None,
-                "rain_1h_in":  _sp(pairs, 1),   "rain_24h_in": _sp(pairs, 24),
+                "rain_1h_in":  _sp(pairs,  1),  "rain_24h_in": _sp(pairs, 24),
                 "rain_3d_in":  _sp(pairs, 72),  "rain_5d_in":  _sp(pairs, 120),
                 "rain_7d_in":  _sp(pairs, 168), "rain_14d_in": _sp(pairs, 336),
                 "snow_7d_in":  _sp(snow_pairs, 168)}
@@ -652,20 +755,17 @@ def _fetch_era5():
                 "snow_7d_in": 0.0}
 
 
-# ── Orchestrator ──────────────────────────────────────────────────────────────
+# ── Merge helper ──────────────────────────────────────────────────────────────
 
 def _fill(primary, secondary):
     """
-    Merge two precip dicts.  Strategy:
-      - rain_rate_in_hr : primary wins (most real-time source is already first)
-      - all rain totals  : take the MAX across primary and secondary.
-                          A broken sensor (0.0) must never beat a working one.
+    Merge two precip dicts.
+      rain_rate_in_hr : primary wins (most real-time source first)
+      all accumulations: MAX across both — a broken zero must never beat real rain
     """
     out = dict(primary)
-    # Rain rate: fill None only — instantaneous reading from nearest source wins
     if out.get("rain_rate_in_hr") is None and secondary.get("rain_rate_in_hr") is not None:
         out["rain_rate_in_hr"] = secondary["rain_rate_in_hr"]
-    # Accumulation totals: max wins — broken-zero sensor can't suppress real rain
     for k in ["rain_1h_in","rain_24h_in","rain_3d_in",
               "rain_5d_in","rain_7d_in","rain_14d_in","snow_7d_in"]:
         pv = out.get(k)
@@ -673,37 +773,55 @@ def _fill(primary, secondary):
         if pv is None and sv is not None:
             out[k] = sv
         elif pv is not None and sv is not None:
-            out[k] = max(pv, sv)   # higher credible value always wins
+            out[k] = max(pv, sv)
     return out
 
+
+# ── Orchestrator ──────────────────────────────────────────────────────────────
+
 def fetch_precip_best(nws_grid_props=None):
+    """
+    Walk the fallback chain and merge all available sources.
+    Chain order: AWN-RiverBend → NWS-K24A → ASOS → OpenMeteo → NWS-QPE → ERA5
+    """
     results, best = [], None
 
-    # 1.5 — Ambient Weather
-    aw = _fetch_ambient_weather()
-    if aw.get("ok"):
-        results.append(aw); best = aw
+    # 1.5 — Ambient Weather Network (RiverBend, Sylva)
+    awn = _fetch_ambient_weather()
+    if awn.get("ok"):
+        results.append(awn)
+        best = awn
+        log.info("AWN-RiverBend OK: rain_rate=%.3f rain_24h=%.2f",
+                 awn.get("rain_rate_in_hr", 0), awn.get("rain_24h_in", 0))
+    else:
+        log.warning("AWN-RiverBend unavailable: %s", awn.get("reason", "unknown"))
 
-    # 2 — ASOS
+    # 2 — NWS K24A
+    k24a = _fetch_nws_k24a()
+    if k24a.get("ok"):
+        results.append(k24a)
+        best = _fill(best, k24a) if best else k24a
+
+    # 3 — ASOS
     asos = _fetch_asos_best()
     if asos.get("ok"):
         results.append(asos)
         best = _fill(best, asos) if best else asos
 
-    # 3 — Open-Meteo forecast model
+    # 4 — Open-Meteo forecast model
     om = _fetch_openmeteo_recent()
     if om.get("ok"):
         results.append(om)
         best = _fill(best, om) if best else om
 
-    # 4 — NWS grid QPE (free reuse)
+    # 5 — NWS grid QPE
     if nws_grid_props:
         nws = _parse_nws_qpe(nws_grid_props)
         if nws.get("ok"):
             results.append(nws)
             best = _fill(best, nws) if best else nws
 
-    # 5 — ERA5 archive (last resort)
+    # 6 — ERA5 (last resort or to fill long-window gaps)
     if best is None or best.get("rain_7d_in") is None:
         era5 = _fetch_era5()
         results.append(era5)
@@ -724,16 +842,17 @@ def fetch_precip_best(nws_grid_props=None):
     best["sources"] = [r["source"] for r in results if r.get("ok")]
     return best
 
+
 def _precip_badge(station_rain, backup):
     if station_rain.get("ok"):
         return f"{station_rain['count']} LIVE PWS", "#00FF9C"
     src = backup.get("source", "")
-    if "NWS-K24A"       in src: return "NWS K24A OBSERVED",      "#00FF9C"
-    if "AmbientWeather" in src: return "AMBIENT WEATHER PWS",    "#00FF9C"
-    if "ASOS"           in src: return f"ASOS ({src.split('-')[-1]})", "#00FF9C"
-    if "OpenMeteo"      in src: return "OPEN-METEO FCST MODEL",  "#FFD700"
-    if "NWS"            in src: return "NWS GRID QPE",           "#FFD700"
-    if "ERA5"           in src: return "ERA5 ARCHIVE ⚠ LAGGED",  "#FF3333"
+    if "AWN-RiverBend"  in src: return "AWN — RIVERBEND SYLVA",        "#00FF9C"
+    if "NWS-K24A"       in src: return "NWS K24A OBSERVED",             "#00FF9C"
+    if "ASOS"           in src: return f"ASOS ({src.split('-')[-1]})",   "#00FF9C"
+    if "OpenMeteo"      in src: return "OPEN-METEO FCST MODEL",          "#FFD700"
+    if "NWS"            in src: return "NWS GRID QPE",                   "#FFD700"
+    if "ERA5"           in src: return "ERA5 ARCHIVE ⚠ LAGGED",          "#FF3333"
     return "SOURCE UNKNOWN", "#FF8800"
 
 
@@ -741,65 +860,43 @@ def _precip_badge(station_rain, backup):
 #  5. ADDITIONAL DATA SOURCES
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# ── USGS 03508050: Tuckasegee River at SR 1172 nr Cullowhee (live reference) ──
-
 @st.cache_data(ttl=300)
 def fetch_usgs_tuck_gage() -> dict:
-    """
-    Live discharge and gage height from USGS 03508050 —
-    Tuckasegee River at SR 1172 near Cullowhee, NC.
-
-    This is the only USGS gage near Cullowhee Creek. No dedicated gage
-    exists on Cullowhee Creek itself. The Tuckasegee at this location has
-    DA=147 sq mi; Cullowhee Creek is a tributary ~6.6% of that area.
-
-    Drainage-area scaling: Q_cullowhee ≈ Q_tuck × (9.688 / 147)
-    Used in NOAH as:
-      1. Live reference display (Panel 8 — Tuckasegee Reference Gage)
-      2. Sanity check on modeled Cullowhee Creek flows
-
-    USGS Instantaneous Values API — no authentication required.
-    """
+    """Live discharge + gage height from USGS 03508050 — no auth required."""
     try:
         r = requests.get(
             "https://waterservices.usgs.gov/nwis/iv/",
-            params={
-                "sites":       USGS_TUCK_SITE,
-                "parameterCd": "00060,00065",   # discharge (cfs) + gage height (ft)
-                "format":      "json",
-                "siteStatus":  "active",
-            },
-            headers={"User-Agent": "NOAH-FloodWarning/1.0 (Nautilus Technologies)"},
+            params={"sites": USGS_TUCK_SITE, "parameterCd": "00060,00065",
+                    "format": "json", "siteStatus": "active"},
+            headers={"User-Agent": "NOAH-FloodWarning/1.0"},
             timeout=REQ_TIMEOUT,
         ).json()
 
         ts_list = r.get("value", {}).get("timeSeries", [])
-        out = {"ok": False, "site": USGS_TUCK_SITE}
+        out     = {"ok": False, "site": USGS_TUCK_SITE}
 
         for ts in ts_list:
             var_code = ts.get("variable", {}).get("variableCode", [{}])[0].get("value", "")
             values   = ts.get("values", [{}])[0].get("value", [])
             if not values:
                 continue
-            latest = values[-1]
-            val    = _cp(latest.get("value"), -999, 999999)
+            latest  = values[-1]
+            val     = _cp(latest.get("value"), -999, 999999)
             if val is None or val < 0:
                 continue
-            dt_str = latest.get("dateTime", "")
+            dt_str  = latest.get("dateTime", "")
             try:
-                obs_et = datetime.fromisoformat(
-                    dt_str.replace("Z", "+00:00")).astimezone(ET_TZ)
+                obs_et  = datetime.fromisoformat(dt_str.replace("Z", "+00:00")).astimezone(ET_TZ)
                 age_min = (datetime.now(ET_TZ) - obs_et).total_seconds() / 60.0
             except Exception:
                 age_min = 999
 
             if var_code == "00060":
-                out["discharge_cfs"]    = round(val, 1)
-                out["discharge_age_min"]= round(age_min, 0)
-                # Scale to Cullowhee Creek by drainage area ratio
+                out["discharge_cfs"]        = round(val, 1)
+                out["discharge_age_min"]    = round(age_min, 0)
                 out["cullowhee_scaled_cfs"] = round(val * (LO_DA_SQMI / USGS_TUCK_DA), 1)
             elif var_code == "00065":
-                out["gage_height_ft"]   = round(val, 2)
+                out["gage_height_ft"]       = round(val, 2)
 
         if out.get("discharge_cfs") is not None:
             out["ok"] = True
@@ -831,44 +928,37 @@ def fetch_current_conditions():
         return {"ok": False, "temp": 50.0, "hum": 50.0, "wind": 0.0,
                 "wind_gust": 0.0, "wind_dir": 0.0, "press": 29.92, "precip": 0.0, "wcode": 0}
 
-@st.cache_data(ttl=600)   # 10-min cache — forecast model updates hourly
+
+@st.cache_data(ttl=600)
 def fetch_era5_soil_moisture():
     """
-    Soil moisture from Open-Meteo FORECAST model with past_days=7.
-    Uses best_match (ERA5-Land initialized, NWP-corrected forward) — ~1 hr lag
-    vs. the pure ERA5 archive which lags 1-2 days.
-
-    Layers returned (m³/m³ volumetric water content):
-      soil_moisture_0_to_7cm   — surface layer  (7 cm thick)
-      soil_moisture_7_to_28cm  — shallow layer  (21 cm thick)
-    These are the same variable names as the archive API.
+    Soil moisture from Open-Meteo FORECAST model with past_days=7 (~1 hr lag).
+    Layers: soil_moisture_0_to_7cm  and  soil_moisture_7_to_28cm  (m³/m³ VWC)
     """
     try:
         r = requests.get("https://api.open-meteo.com/v1/forecast", params={
             "latitude": LAT, "longitude": LON,
             "hourly": "soil_moisture_0_to_7cm,soil_moisture_7_to_28cm",
-            "past_days":     7,
-            "forecast_days": 1,
-            "models":        "best_match",
+            "past_days": 7, "forecast_days": 1, "models": "best_match",
         }, timeout=15).json()
         times  = r["hourly"]["time"]
         sm_07  = r["hourly"]["soil_moisture_0_to_7cm"]
         sm_728 = r["hourly"]["soil_moisture_7_to_28cm"]
         now_et = datetime.now(ET_TZ)
-        # Walk backward to find the most recent non-null pair that is in the past
         for i in range(len(times) - 1, -1, -1):
             if sm_07[i] is None or sm_728[i] is None:
                 continue
             try:
                 dt_utc = datetime.fromisoformat(times[i]).replace(tzinfo=UTC_TZ)
                 if dt_utc.astimezone(ET_TZ) > now_et:
-                    continue   # skip future forecast hours
+                    continue
             except Exception:
                 continue
             return round(sm_07[i], 4), round(sm_728[i], 4), times[i], True
         return None, None, None, False
     except Exception:
         return None, None, None, False
+
 
 @st.cache_data(ttl=3600)
 def fetch_usdm_drought():
@@ -896,6 +986,7 @@ def fetch_usdm_drought():
     except Exception:
         return -1, "API UNAVAILABLE", "---"
 
+
 @st.cache_data(ttl=300)
 def fetch_active_alerts():
     try:
@@ -905,7 +996,7 @@ def fetch_active_alerts():
                          timeout=10).json()
         alerts = []
         for feat in r.get("features", []):
-            p = feat.get("properties", {})
+            p     = feat.get("properties", {})
             event = str(p.get("event", "")).strip()
             if not event:
                 continue
@@ -930,7 +1021,8 @@ def fetch_active_alerts():
     except Exception:
         return []
 
-@st.cache_data(ttl=300)   # match active alerts — NWS can update HWO during evolving events
+
+@st.cache_data(ttl=300)
 def fetch_hwo():
     import re
     from html import escape as he
@@ -951,8 +1043,8 @@ def fetch_hwo():
             issued_str = dt.strftime("%b %d, %Y  %I:%M %p ET")
         except Exception:
             pass
-        raw = raw.replace("\r\n","\n").replace("\r","\n")
-        m   = re.search(r"(?m)^\.(DAY|DAYS|THIS)\b", raw, re.IGNORECASE)
+        raw  = raw.replace("\r\n","\n").replace("\r","\n")
+        m    = re.search(r"(?m)^\.(DAY|DAYS|THIS)\b", raw, re.IGNORECASE)
         if not m:
             return None
         body = raw[m.start():]
@@ -966,7 +1058,8 @@ def fetch_hwo():
             i = 1
         while i < len(parts):
             hdr = parts[i].strip()
-            bdy = re.sub(r"\n{3,}", "\n\n", (parts[i+1].strip() if i+1 < len(parts) else "")).strip()
+            bdy = re.sub(r"\n{3,}", "\n\n",
+                         (parts[i+1].strip() if i+1 < len(parts) else "")).strip()
             i  += 2
             if bdy:
                 paras.append({"header": he(hdr), "body": he(bdy)})
@@ -976,7 +1069,7 @@ def fetch_hwo():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  6. TIER 1 LIVE SENSOR ADAPTERS  (unchanged from original)
+#  6. TIER 1 LIVE SENSOR ADAPTERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _crv(x, lo=0.0, hi=50.0):
@@ -1011,58 +1104,16 @@ def _fetch_custom_json(cfg):
     except Exception:
         pass
     out["ok"] = any(out.get(k) is not None for k in
-                    ["rain_rate_in_hr","rain_1h_in","rain_24h_in","rain_3d_in","rain_5d_in","rain_7d_in","rain_14d_in"])
-    return out
-
-def _fetch_weathercom_pws(cfg):
-    sid = cfg.get("station_id","").strip()
-    key = cfg.get("api_key","").strip()
-    if not sid or not key:
-        return {"ok": False}
-    out = {"ok": False}
-    try:
-        obs = (requests.get("https://api.weather.com/v2/pws/observations/current",
-                            params={"stationId":sid,"format":"json","units":"e",
-                                    "numericPrecision":"decimal","apiKey":key},
-                            timeout=REQ_TIMEOUT).json().get("observations") or [{}])[0].get("imperial", {})
-        out["rain_rate_in_hr"] = _crv(obs.get("precipRate"),  0, 15)
-        out["rain_1h_in"]      = _crv(obs.get("precipTotal"), 0, 15)
-        out["rain_24h_in"]     = _crv(obs.get("precipTotal"), 0, 30)
-    except Exception:
-        pass
-    try:
-        rows   = requests.get("https://api.weather.com/v2/pws/observations/hourly/7day",
-                              params={"stationId":sid,"format":"json","units":"e",
-                                      "numericPrecision":"decimal","apiKey":key},
-                              timeout=REQ_TIMEOUT).json().get("observations", [])
-        now_et = datetime.now(ET_TZ)
-        hourly = []
-        for row in rows:
-            try:
-                age = (now_et - datetime.fromtimestamp(int(row["epoch"]),tz=UTC_TZ).astimezone(ET_TZ)).total_seconds()/3600.0
-                if age < 0:
-                    continue
-                hourly.append((age, _crv(row.get("imperial",{}).get("precipTotal"),0,10) or 0.0))
-            except Exception:
-                continue
-        if hourly:
-            out["rain_24h_in"] = _crv(sum(p for a,p in hourly if a<=24),  0, 30)
-            out["rain_3d_in"]  = _crv(sum(p for a,p in hourly if a<=72),  0, 40)
-            out["rain_5d_in"]  = _crv(sum(p for a,p in hourly if a<=120), 0, 50)
-            out["rain_7d_in"]  = _crv(sum(p for a,p in hourly if a<=168), 0, 60)
-    except Exception:
-        pass
-    out["ok"] = any(out.get(k) is not None for k in
-                    ["rain_rate_in_hr","rain_1h_in","rain_24h_in","rain_3d_in","rain_5d_in","rain_7d_in"])
+                    ["rain_rate_in_hr","rain_1h_in","rain_24h_in",
+                     "rain_3d_in","rain_5d_in","rain_7d_in","rain_14d_in"])
     return out
 
 @st.cache_data(ttl=300)
 def fetch_realtime_stations():
     results = []
     for cfg in REALTIME_RAIN_STATIONS:
-        t = cfg.get("type","").strip().lower()
-        res = _fetch_custom_json(cfg) if t == "custom_json" else \
-              _fetch_weathercom_pws(cfg) if t == "weathercom_pws" else {"ok": False}
+        t   = cfg.get("type","").strip().lower()
+        res = _fetch_custom_json(cfg) if t == "custom_json" else {"ok": False}
         if res.get("ok"):
             res["weight"] = float(cfg.get("weight", 1.0))
             results.append(res)
@@ -1100,59 +1151,28 @@ def calc_api_sat_pct(rain_5d):
 
 def calc_soil_sat_ensemble(sm_07, sm_728, sm_ok, rain_5d, usdm_level):
     """
-    Weighted ensemble of three soil saturation estimators.
-
-    Sources:
-      era5_pct  — Open-Meteo forecast model volumetric water content (~1 hr lag)
-      api_pct   — Antecedent Precipitation Index from observed 5-day rain total
-      usdm_pct  — USDM drought classification implied saturation
-
-    Weighting philosophy:
-      - ERA5/forecast model is the most physically grounded when available
-      - API is direct observed rainfall at the site — high weight always
-      - USDM is a weekly drought product; useful context but NOT a ceiling.
-        USDM was designed for drought monitoring, not flood prediction.
-        A D0 "Abnormally Dry" classification from last week must not cap
-        saturation during an active multi-hour rainfall event.
-
-    The USDM ceiling (_USDM_CEILING) has been REMOVED. It was suppressing
-    saturation estimates during exactly the storms that matter most.
-    USDM only informs the ensemble weight — it never hard-caps the result.
+    Weighted ensemble: ERA5 model VWC + antecedent precip index + USDM context.
+    USDM is informational only — never hard-caps saturation during active storms.
     """
     api_pct  = calc_api_sat_pct(rain_5d)
     era5_pct = calc_era5_sat_pct(sm_07, sm_728) if (sm_ok and sm_07 is not None) else None
-    # USDM: only use as a signal when drought is active (level >= 1)
-    # Under no-drought (level 0 or -1) USDM adds no information
     usdm_pct = _USDM_IMPLIED_SAT.get(usdm_level) if usdm_level >= 1 else None
 
-    # ERA5 dominant when fresh model data available; API always heavily weighted
     if usdm_level <= 0:   w_era5, w_api, w_usdm = 0.55, 0.45, 0.0
     elif usdm_level == 1: w_era5, w_api, w_usdm = 0.45, 0.45, 0.10
     elif usdm_level == 2: w_era5, w_api, w_usdm = 0.40, 0.45, 0.15
     else:                 w_era5, w_api, w_usdm = 0.35, 0.50, 0.15
 
-    # Redistribute weight if ERA5 unavailable
     if era5_pct is None:
-        w_api += w_era5
-        w_era5  = 0.0
-        era5_pct = api_pct   # placeholder (weight is 0, value irrelevant)
-
-    # Redistribute weight if USDM not applicable
+        w_api += w_era5; w_era5 = 0.0; era5_pct = api_pct
     if usdm_pct is None:
-        w_api  += w_usdm
-        w_usdm  = 0.0
-        usdm_pct = api_pct   # placeholder
+        w_api += w_usdm; w_usdm = 0.0; usdm_pct = api_pct
 
-    sat_pct = (era5_pct * w_era5) + (api_pct * w_api) + (usdm_pct * w_usdm)
-    # NO USDM CEILING — clamp only to physical limits [1, 100]
-    sat_pct = round(min(100.0, max(1.0, sat_pct)), 1)
+    sat_pct = round(min(100.0, max(1.0,
+        era5_pct * w_era5 + api_pct * w_api + usdm_pct * w_usdm)), 1)
 
-    # Stored water in inches: layer thickness × volumetric moisture
-    # 0-7 cm layer  = 2.756 in depth;  7-28 cm layer = 8.268 in depth
     if sm_ok and sm_07 is not None:
-        stored = round(
-            (min(sm_07,  SOIL_POROSITY) * 2.756) +
-            (min(sm_728, SOIL_POROSITY) * 8.268), 2)
+        stored = round((min(sm_07,SOIL_POROSITY)*2.756) + (min(sm_728,SOIL_POROSITY)*8.268), 2)
     else:
         stored = round((sat_pct / 100.0) * (SOIL_POROSITY * 11.024), 2)
 
@@ -1188,36 +1208,19 @@ def model_stream(soil_sat_pct, rain_24h, qpf_24h, rain_7d,
     Q_storm = (_tr55_unit_peak(tc_hrs, min(0.50,max(0.10,Ia/P))) * da_sqmi * Q_runoff_in
                if Q_runoff_in > 0 and P > 0 else 0.0)
     Q_base   = baseflow * (1.0 + (soil_sat_pct / 100.0) * 3.0)
-    # Q_recess: antecedent precipitation contribution to current baseflow above normal.
-    # Coefficient derived from USGS 03508050 Tuckasegee recession analysis:
-    #   K = 0.046/day (StreamStats NC Blue Ridge RI=50d) × 5-day typical lag = 0.23
-    #   rain_7d - rain_24h = inches of prior-week rain not counting today's event
     Q_recess = max(0.0, (rain_7d - rain_24h) * baseflow * RECESSION_K * 5.0)
     Q_total  = round(max(baseflow*0.5, min(Q_base+Q_storm+Q_recess, bankfull_q*3.0)), 1)
     depth_ft = round(max(0.20, min((Q_total/rating_a)**(1.0/rating_b), 9.0)), 2)
     return depth_ft, Q_total
 
 def flood_threat_score(soil_sat, rain_24h, qpf_6h, pop_24h):
-    """
-    Composite flood threat score 0-100.
-
-    Weights:
-      40% — Soil saturation     (antecedent condition — what the ground can absorb)
-      30% — Observed 24h rain   (what has already fallen — most direct flood driver)
-      20% — QPF next 6h         (what is still coming)
-      10% — Probability of precip (confidence in continued rainfall)
-
-    rain_24h scaled: 1" = 30 pts, 2" = 60 pts, 3"+ = 90+ pts (caps at 100)
-    qpf_6h  scaled:  0.5" = 20 pts cap (future rain is less certain)
-    """
     rain_component = min(100.0, rain_24h * 30.0)
     qpf_component  = min(100.0, qpf_6h  * 40.0)
     return round(min(100.0,
-        (soil_sat      * 0.40) +
+        (soil_sat       * 0.40) +
         (rain_component * 0.30) +
         (qpf_component  * 0.20) +
-        (pop_24h        * 0.10)
-    ), 1)
+        (pop_24h        * 0.10)), 1)
 
 def threat_meta(score):
     if score < 25: return "NORMAL",    "#00FF9C", "rgba(0,255,156,0.07)"
@@ -1337,7 +1340,7 @@ def _alert_style(event_name):
 
 conditions    = fetch_current_conditions()
 usgs_tuck     = fetch_usgs_tuck_gage()
-forecast      = _build_unified_forecast()        # also caches _nws_grid_props
+forecast      = _build_unified_forecast()          # also caches _nws_grid_props
 station_rain  = fetch_realtime_stations()
 active_alerts = fetch_active_alerts()
 hwo_text      = fetch_hwo()
@@ -1349,29 +1352,23 @@ usdm_level, usdm_label, usdm_date = fetch_usdm_drought()
 _nws_grid   = st.session_state.get("_nws_grid_props")
 backup_rain = fetch_precip_best(nws_grid_props=_nws_grid)
 
-# Resolve final rain values: Tier 1 sensor wins; else best-available chain
+# Resolve final rain values: Tier 1 deployed sensors win; else best-available chain
 if station_rain.get("ok"):
-    rain_24h  = station_rain.get("rain_24h_in")  or backup_rain["rain_24h_in"]
-    rain_5d   = station_rain.get("rain_5d_in")   or backup_rain["rain_5d_in"]
-    rain_7d   = station_rain.get("rain_7d_in")   or backup_rain["rain_7d_in"]
+    rain_24h = station_rain.get("rain_24h_in") or backup_rain["rain_24h_in"]
+    rain_5d  = station_rain.get("rain_5d_in")  or backup_rain["rain_5d_in"]
+    rain_7d  = station_rain.get("rain_7d_in")  or backup_rain["rain_7d_in"]
 else:
-    rain_24h  = backup_rain["rain_24h_in"]
-    rain_5d   = backup_rain["rain_5d_in"]
-    rain_7d   = backup_rain["rain_7d_in"]
+    rain_24h = backup_rain["rain_24h_in"]
+    rain_5d  = backup_rain["rain_5d_in"]
+    rain_7d  = backup_rain["rain_7d_in"]
 
-# RAIN NOW: take the maximum across all available sources.
-# Avoids false zero when any single source misses the event.
-# Sources:
-#   rain_rate_in_hr  — live sensor rate (when deployed)
-#   rain_1h_in       — observed last-hour total (K24A/ASOS accumulation)
-#   conditions[precip]— Open-Meteo model last-hour precip (lagged but continuous)
-# Note: or-logic fails when value is 0.0 (falsy). Use max() instead.
+# RAIN NOW: max across all available sources — avoids false zero from any single failure
 _candidates = [
-    station_rain.get("rain_rate_in_hr"),       # Tier 1 live sensor
-    station_rain.get("rain_1h_in"),            # Tier 1 live 1h total
-    backup_rain.get("rain_rate_in_hr"),        # K24A/ASOS rate proxy
-    backup_rain.get("rain_1h_in"),             # K24A/ASOS 1h observed
-    conditions["precip"],                       # Open-Meteo model 1h precip
+    station_rain.get("rain_rate_in_hr"),
+    station_rain.get("rain_1h_in"),
+    backup_rain.get("rain_rate_in_hr"),
+    backup_rain.get("rain_1h_in"),
+    conditions["precip"],
 ]
 rain_now = max((v for v in _candidates if v is not None), default=0.0)
 rain_now = round(rain_now, 3)
@@ -1379,44 +1376,17 @@ rain_now = round(rain_now, 3)
 soil_sat, soil_stored, soil_color = calc_soil_sat_ensemble(
     sm_07, sm_728, sm_ok, rain_5d, usdm_level)
 
-# ── Sub-basin soil saturation: state-aware modifier ─────────────────────────
-# ERA5/Open-Meteo returns a single 9km grid cell — both sub-basins see the
-# same raw model output. However, three physical factors create real differences:
-#
-#   1. Drainage speed: upper Tc=1.2h vs lower Tc=2.5h → upper drains 2x faster
-#      Between storms: upper is LESS saturated (dries out faster)
-#      During active storms: upper saturates FASTER (fills sooner)
-#
-#   2. Orographic precipitation: upper centroid ~3500 ft vs lower ~2700 ft
-#      Southern Blue Ridge receives ~7%/1000ft more rain at elevation.
-#      Upper basin sees ~5-6% more precipitation for any given event.
-#
-#   3. Soil depth: ridge soils ~18 in vs valley soils ~36 in — upper fills
-#      to capacity at roughly half the cumulative rain input of the lower.
-#
-# Solution: a storm-state modifier that transitions based on rain_24h:
-#   - Dry antecedent (rain_24h → 0):   upper = lower × 0.88  (drains faster)
-#   - Active storm  (rain_24h ≥ 1.5"): upper = lower × 1.08  (saturates faster)
-#   The old _UP_DRAIN factor (0.78 constant) was wrong — it always suppressed
-#   upper saturation even during active storms, which is physically backwards.
-#
-# Additionally apply orographic rainfall enhancement to rain_5d for upper basin.
+# Sub-basin soil saturation with orographic and drainage-speed modifiers
+_oro_factor  = 1.056
+_rain_5d_up  = round(min(rain_5d  * _oro_factor, 15.0), 3)
+_rain_24h_up = round(min(rain_24h * _oro_factor, 20.0), 3)
 
-_oro_factor   = 1.056   # +5.6% precip at upper centroid (~800 ft higher)
-_rain_5d_up   = round(min(rain_5d * _oro_factor, 15.0), 3)
-_rain_24h_up  = round(min(rain_24h * _oro_factor, 20.0), 3)
-
-# Storm-state saturation modifier: transitions 0.88 → 1.08 over 0–1.5" of 24h rain
 _storm_pct    = min(1.0, rain_24h / 1.5)
-_sat_modifier = 0.88 + _storm_pct * 0.20   # 0.88 dry → 1.08 active storm
+_sat_modifier = 0.88 + _storm_pct * 0.20
 
 soil_sat_lo = soil_sat
-soil_sat_up = round(min(100.0, max(1.0, soil_sat * _sat_modifier)), 1)
-
-# Recalculate stored water for upper basin using orographic-enhanced rain
 _soil_sat_up_raw, _, _ = calc_soil_sat_ensemble(
     sm_07, sm_728, sm_ok, _rain_5d_up, usdm_level)
-# Blend: 50% ERA5-based (orographic), 50% modifier-based (drainage speed)
 soil_sat_up = round(min(100.0, max(1.0,
     0.50 * _soil_sat_up_raw * _sat_modifier +
     0.50 * soil_sat * _sat_modifier)), 1)
@@ -1427,35 +1397,27 @@ def _ss(s): return round((s/100.0)*(SOIL_POROSITY*11.024), 2)
 soil_color_lo  = _sc(soil_sat_lo);  soil_stored_lo = soil_stored
 soil_color_up  = _sc(soil_sat_up);  soil_stored_up = _ss(soil_sat_up)
 
-# QPF: use only NEXT 6 hours, not full 24h window.
-# rain_24h already contains observed rainfall from the past 24h.
-# Adding full 24h QPF on top double-counts rainfall currently falling.
-# The 6h horizon is appropriate for TR-55 event-based runoff estimation.
-qpf_6h   = _qpf_next_hours(6)
-qpf_24h  = qpf_6h   # alias — model_stream signature unchanged
-pop_24h  = forecast[0]["pop"] if forecast else 0.0
+qpf_6h  = _qpf_next_hours(6)
+qpf_24h = qpf_6h
+pop_24h = forecast[0]["pop"] if forecast else 0.0
 
 threat             = flood_threat_score(soil_sat_lo, rain_24h, qpf_6h, pop_24h)
 t_lbl, t_clr, t_bg = threat_meta(threat)
 
 lo_depth, lo_flow = model_stream(soil_sat_lo, rain_24h, qpf_24h, rain_7d,
     LO_DA_SQMI, LO_TC_HRS, LO_CN_II, LO_BASEFLOW, LO_RATING_A, LO_RATING_B, LO_BANKFULL_Q)
-# Upper basin uses orographic-enhanced rainfall inputs
 up_depth, up_flow = model_stream(soil_sat_up, _rain_24h_up, qpf_6h, _rain_5d_up,
     UP_DA_SQMI, UP_TC_HRS, UP_CN_II, UP_BASEFLOW, UP_RATING_A, UP_RATING_B, UP_BANKFULL_Q)
 
-for k,v in [("lo_depth",lo_depth),("lo_flow",lo_flow),
-            ("up_depth",up_depth),("up_flow",up_flow)]:
+for k, v in [("lo_depth",lo_depth),("lo_flow",lo_flow),
+             ("up_depth",up_depth),("up_flow",up_flow)]:
     if k not in st.session_state:
         st.session_state[k] = v
 
-# Asymmetric smoothing — critical for flood warning:
-#   Rising limb  (new > old): pass through immediately — never lag a warning
-#   Falling limb (new < old): smooth slowly — avoid false all-clear signals
 def _smooth(old, new, decimals):
     if new >= old:
-        return round(new, decimals)                        # rising: instant
-    return round(old * 0.85 + new * 0.15, decimals)       # falling: gradual
+        return round(new, decimals)
+    return round(old * 0.85 + new * 0.15, decimals)
 
 st.session_state.lo_depth = _smooth(st.session_state.lo_depth, lo_depth, 2)
 st.session_state.lo_flow  = _smooth(st.session_state.lo_flow,  lo_flow,  1)
@@ -1470,18 +1432,22 @@ up_flow_lbl,  up_flow_clr  = flow_status(st.session_state.up_flow,   UP_BANKFULL
 lo_bkf_pct = round(min(100, st.session_state.lo_depth/LO_BANKFULL*100), 1)
 up_bkf_pct = round(min(100, st.session_state.up_depth/UP_BANKFULL*100), 1)
 
-_q_ref      = max(LO_BASEFLOW, st.session_state.lo_flow)
-# Flood wave travel time: power-law kinematic scaling
-# t = t_ref * (Q_ref / Q)^0.40  (Manning's kinematic wave, natural channel)
-# FLOOD_TRAVEL_MIN=65 calibrated to 4-mile reach at near-bankfull Q via Manning's.
-# Previous formula had a modulo artifact (up_flow % 7.3) that created a
-# physically meaningless sawtooth wave. Removed.
-travel_min  = round(min(90.0, max(15.0,
+_q_ref     = max(LO_BASEFLOW, st.session_state.lo_flow)
+travel_min = round(min(90.0, max(15.0,
     FLOOD_TRAVEL_MIN * (LO_BASEFLOW / _q_ref) ** 0.40)), 1)
-_tw_clr     = "#FF3333" if travel_min<25 else "#FF8800" if travel_min<35 else "#FFD700" if travel_min<50 else "#00FF9C"
+_tw_clr    = "#FF3333" if travel_min<25 else "#FF8800" if travel_min<35 else "#FFD700" if travel_min<50 else "#00FF9C"
+_r7_clr    = "#FF3333" if rain_7d>5.0 else "#FF8800" if rain_7d>3.0 else "#FFD700" if rain_7d>1.5 else "#00FF9C"
 
-_r7_clr     = "#FF3333" if rain_7d>5.0 else "#FF8800" if rain_7d>3.0 else "#FFD700" if rain_7d>1.5 else "#00FF9C"
 _src_label, _src_color = _precip_badge(station_rain, backup_rain)
+
+# Current-conditions overlay from AWN if available (temp/wind/pressure)
+_awn_data = backup_rain if "AWN" in backup_rain.get("source", "") else {}
+_disp_temp  = _awn_data.get("tempf",        conditions["temp"])
+_disp_wind  = _awn_data.get("windspeedmph", conditions["wind"])
+_disp_gust  = _awn_data.get("windgustmph",  conditions["wind_gust"])
+_disp_hum   = _awn_data.get("humidity",     conditions["hum"])
+_disp_baro  = _awn_data.get("baromrelin",   conditions["press"])
+_awn_event  = _awn_data.get("rain_event_in")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1490,15 +1456,54 @@ _src_label, _src_color = _precip_badge(station_rain, backup_rain)
 
 now_et = datetime.now(ET_TZ)
 
-# (no pre-render status check needed — NWS K24A is always authoritative)
-
 # ── HEADER ────────────────────────────────────────────────────────────────────
+_awn_ok_str = (f"AWN-RIVERBEND &nbsp;&#x25CF;&nbsp; {backup_rain.get('mac','')[:8]}…"
+               if "AWN" in backup_rain.get("source","") else "")
+
 st.markdown(f"""
 <div class="site-header">
   <div class="site-title">NOAH: CULLOWHEE CREEK FLOOD WARNING</div>
   <div class="site-sub">
     Cullowhee Creek Watershed &mdash; Jackson County, NC
     &nbsp;|&nbsp; {now_et.strftime("%A, %B %d %Y")} &mdash; {now_et.strftime("%H:%M")}
+    &nbsp;|&nbsp; <span style="color:{_src_color};">{_src_label}</span>
+    {"&nbsp;|&nbsp; " + _awn_ok_str if _awn_ok_str else ""}
+  </div>
+</div>""", unsafe_allow_html=True)
+
+# ── PANEL 0: AWN STATION STATUS (when active) ─────────────────────────────────
+if "AWN" in backup_rain.get("source", ""):
+    _awn_rate    = backup_rain.get("rain_rate_in_hr", 0.0) or 0.0
+    _awn_1h      = backup_rain.get("rain_1h_in",      0.0) or 0.0
+    _awn_24h_disp= backup_rain.get("rain_24h_in",     0.0) or 0.0
+    _awn_7d_disp = backup_rain.get("rain_7d_in",      0.0) or 0.0
+    _event_str   = f"{_awn_event:.2f}&quot;" if _awn_event is not None else "---"
+    st.markdown(f"""
+<div style="background:rgba(0,30,60,0.6);border:1px solid rgba(0,200,255,0.30);
+            border-radius:10px;padding:14px 20px;margin-bottom:14px;">
+  <div style="font-family:'Share Tech Mono',monospace;font-size:0.72em;color:#00CFFF;
+              letter-spacing:3px;margin-bottom:10px;">
+    &#x25CF; AWN — RIVERBEND ON THE TUCKASEGEE &nbsp;&bull;&nbsp; SYLVA, NC
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:10px;text-align:center;">
+    <div><div style="font-size:0.65em;color:#5AACD0;letter-spacing:1px;">RATE</div>
+         <div style="font-size:1.5em;font-weight:700;color:#00CFFF;">{_awn_rate:.3f}&quot;/hr</div></div>
+    <div><div style="font-size:0.65em;color:#5AACD0;letter-spacing:1px;">1-HR</div>
+         <div style="font-size:1.5em;font-weight:700;color:#00CFFF;">{_awn_1h:.3f}&quot;</div></div>
+    <div><div style="font-size:0.65em;color:#5AACD0;letter-spacing:1px;">EVENT</div>
+         <div style="font-size:1.5em;font-weight:700;color:#00CFFF;">{_event_str}</div></div>
+    <div><div style="font-size:0.65em;color:#5AACD0;letter-spacing:1px;">24-HR</div>
+         <div style="font-size:1.5em;font-weight:700;color:#00CFFF;">{_awn_24h_disp:.2f}&quot;</div></div>
+    <div><div style="font-size:0.65em;color:#5AACD0;letter-spacing:1px;">7-DAY</div>
+         <div style="font-size:1.5em;font-weight:700;color:#00CFFF;">{_awn_7d_disp:.2f}&quot;</div></div>
+    <div><div style="font-size:0.65em;color:#5AACD0;letter-spacing:1px;">TEMP</div>
+         <div style="font-size:1.5em;font-weight:700;color:#FF6666;">{_disp_temp:.1f}°F</div></div>
+    <div><div style="font-size:0.65em;color:#5AACD0;letter-spacing:1px;">WIND / GUST</div>
+         <div style="font-size:1.3em;font-weight:700;color:#5AC8FA;">{_disp_wind:.0f} / {_disp_gust:.0f} mph</div></div>
+  </div>
+  <div style="font-family:'Share Tech Mono',monospace;font-size:0.60em;color:#2A4A5A;
+              margin-top:8px;text-align:right;">
+    SOURCES ACTIVE: {" &middot; ".join(backup_rain.get("sources", []))}
   </div>
 </div>""", unsafe_allow_html=True)
 
@@ -1519,19 +1524,17 @@ st.markdown(f"""
   </div>
   <div style="font-family:'Share Tech Mono',monospace;font-size:0.68em;color:#3A6A8A;
               margin-top:10px;letter-spacing:1px;">
-    EVALUATED FACTORS: Soil Saturation &middot; 24hr Rainfall Forecast &middot; Probability of Precipitation
+    EVALUATED FACTORS: Soil Saturation &middot; 24hr Rainfall &middot; QPF &middot; Probability of Precipitation
   </div>
 </div>""", unsafe_allow_html=True)
 
-# ── PANEL 1B: WARNINGS & WATCHES (rank >= 3 only) ───────────────────────────
-# Advisories and statements (rank <= 2) are grouped with the HWO panel below.
-_severe_alerts    = [a for a in active_alerts
-                     if ALERT_RANK.get(a["event"].lower(), 0) >= 3]
-_advisory_alerts  = [a for a in active_alerts
-                     if ALERT_RANK.get(a["event"].lower(), 0) in (1, 2)]
+# ── PANEL 1B: WARNINGS & WATCHES (rank >= 3) ──────────────────────────────────
+_severe_alerts   = [a for a in active_alerts if ALERT_RANK.get(a["event"].lower(), 0) >= 3]
+_advisory_alerts = [a for a in active_alerts if ALERT_RANK.get(a["event"].lower(), 0) in (1, 2)]
 
 if _severe_alerts:
-    st.markdown('<div class="panel"><div class="panel-title">ACTIVE WARNINGS &amp; WATCHES</div>', unsafe_allow_html=True)
+    st.markdown('<div class="panel"><div class="panel-title">ACTIVE WARNINGS &amp; WATCHES</div>',
+                unsafe_allow_html=True)
     for a in _severe_alerts:
         sty  = _alert_style(a["event"])
         summ = a["headline"] if a["headline"] else a["description"]
@@ -1547,14 +1550,9 @@ if _severe_alerts:
 </div>""", unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ── PANEL 1C: NWS SITUATIONAL AWARENESS — advisories + HWO ──────────────────
-# Wind Advisories, Flood Advisories, Special Statements, and the HWO are all
-# NWS "heads up" products. They belong together. Warnings/Watches (rank≥3)
-# are above in Panel 1B. This panel is the forecaster narrative context.
+# ── PANEL 1C: NWS SITUATIONAL AWARENESS — advisories + HWO ───────────────────
 if hwo_text or _advisory_alerts:
     _ph = ""
-
-    # Advisories and statements pinned at the top of the HWO panel
     for a in _advisory_alerts:
         sty  = _alert_style(a["event"])
         summ = a["headline"] if a["headline"] else a["description"]
@@ -1568,12 +1566,8 @@ if hwo_text or _advisory_alerts:
   <div style="font-family:'Share Tech Mono',monospace;font-size:0.63em;color:#7AACCC;margin-top:6px;">
     {"Until " + a["expires_local"] if a["expires_local"] else ""}</div>
 </div>"""
-
-    # Divider between advisories and HWO prose (only if both present)
     if _advisory_alerts and hwo_text:
         _ph += '<div style="border-top:1px solid rgba(255,136,0,0.20);margin:14px 0;"></div>'
-
-    # HWO prose sections
     if hwo_text:
         for para in hwo_text["paragraphs"]:
             if para["header"]:
@@ -1581,10 +1575,9 @@ if hwo_text or _advisory_alerts:
                         f'color:#FFB066;letter-spacing:2px;margin:14px 0 5px;">{para["header"]}</div>')
             _ph += (f'<div style="font-size:1.0em;color:#FFE0C2;line-height:1.65;margin-bottom:4px;">'
                     f'{para["body"].replace(chr(10)+chr(10),"<br><br>").replace(chr(10)," ")}</div>')
-
     _issued_line = (f'NWS GREENVILLE-SPARTANBURG (GSP) &nbsp;&middot;&nbsp; JACKSON COUNTY, NC'
-                    f'&nbsp;&middot;&nbsp; ISSUED: {hwo_text["issued"]}') if hwo_text else                    'NWS GREENVILLE-SPARTANBURG (GSP) &nbsp;&middot;&nbsp; JACKSON COUNTY, NC'
-
+                    f'&nbsp;&middot;&nbsp; ISSUED: {hwo_text["issued"]}') if hwo_text else \
+                   'NWS GREENVILLE-SPARTANBURG (GSP) &nbsp;&middot;&nbsp; JACKSON COUNTY, NC'
     st.markdown(f"""
 <div style="background:rgba(255,136,0,0.07);border:2px solid #FF8800;border-radius:10px;
             padding:20px 28px;margin-bottom:16px;">
@@ -1600,19 +1593,21 @@ if hwo_text or _advisory_alerts:
 </div>""", unsafe_allow_html=True)
 
 # ── PANEL 2: ATMOSPHERIC CONDITIONS ──────────────────────────────────────────
-st.markdown('<div class="panel"><div class="panel-title">ATMOSPHERIC CONDITIONS</div>', unsafe_allow_html=True)
+_cond_src = "AWN — RIVERBEND" if "AWN" in backup_rain.get("source","") else "OPEN-METEO / NWS K24A"
+st.markdown(f'<div class="panel"><div class="panel-title">ATMOSPHERIC CONDITIONS &nbsp;&bull;&nbsp; {_cond_src}</div>',
+            unsafe_allow_html=True)
 c1, c2, c3, c4 = st.columns(4)
 with c1:
-    st.plotly_chart(make_dial(conditions["wind"], "WIND SPEED",   0, 50,  " mph", "#5AC8FA"), use_container_width=True)
+    st.plotly_chart(make_dial(_disp_wind, "WIND SPEED",   0, 50,  " mph", "#5AC8FA"), use_container_width=True)
 with c2:
-    st.plotly_chart(make_dial(conditions["temp"], "TEMPERATURE",  0, 110, " F",   "#FF3333"), use_container_width=True)
+    st.plotly_chart(make_dial(_disp_temp, "TEMPERATURE",  0, 110, " F",   "#FF3333"), use_container_width=True)
 with c3:
-    st.plotly_chart(make_dial(rain_now,           "RAIN (1-HR)",  0, 3,   '"',"#0077FF"), use_container_width=True)
+    st.plotly_chart(make_dial(rain_now,   "RAIN (1-HR)",  0, 3,   '"',    "#0077FF"), use_container_width=True)
 with c4:
-    st.plotly_chart(make_dial(rain_7d,            "RAIN (7-DAY)", 0, 10,  '"',    _r7_clr),   use_container_width=True)
+    st.plotly_chart(make_dial(rain_7d,    "RAIN (7-DAY)", 0, 10,  '"',    _r7_clr),  use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ── PANEL 3: UPPER WATERSHED ─────────────────────────────────────────────────
+# ── PANEL 3: UPPER WATERSHED ──────────────────────────────────────────────────
 _up_max = UP_BANKFULL * 2.5
 st.markdown(f'<div class="upper-panel"><div class="upper-title">'
             f'UPPER CULLOWHEE CREEK ({UP_AREA_ACRES:,} AC | {UP_DA_SQMI:.2f} mi²)</div>',
@@ -1621,16 +1616,16 @@ u1, u2, u3 = st.columns([2, 2, 3])
 with u1:
     st.components.v1.html(make_stream_gauge(
         "g_up_depth", st.session_state.up_depth, 0.0, _up_max, " ft",
-        [{"range":[0.0,          UP_BANKFULL*0.60],"color":"rgba(0,255,156,0.15)"},
+        [{"range":[0.0,             UP_BANKFULL*0.60],"color":"rgba(0,255,156,0.15)"},
          {"range":[UP_BANKFULL*0.60,UP_BANKFULL*0.95],"color":"rgba(255,215,0,0.20)"},
-         {"range":[UP_BANKFULL*0.95,_up_max],        "color":"rgba(255,51,51,0.25)"}],
+         {"range":[UP_BANKFULL*0.95,_up_max],         "color":"rgba(255,51,51,0.25)"}],
         up_depth_clr, up_depth_lbl, up_depth_clr,
         f"Stage: {st.session_state.up_depth:.2f} ft"), height=240)
 with u2:
     _up_q_max = UP_BANKFULL_Q * 3.0
     st.components.v1.html(make_stream_gauge(
         "g_up_flow", st.session_state.up_flow, 0.0, _up_q_max, " cfs",
-        [{"range":[0.0,             UP_BANKFULL_Q*0.45],"color":"rgba(0,255,156,0.15)"},
+        [{"range":[0.0,              UP_BANKFULL_Q*0.45],"color":"rgba(0,255,156,0.15)"},
          {"range":[UP_BANKFULL_Q*0.45,UP_BANKFULL_Q*0.95],"color":"rgba(255,215,0,0.20)"},
          {"range":[UP_BANKFULL_Q*0.95,_up_q_max],         "color":"rgba(255,51,51,0.25)"}],
         up_flow_clr, up_flow_lbl, up_flow_clr,
@@ -1648,7 +1643,7 @@ with u3:
 </div>""", unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ── PANEL 4: LOWER WATERSHED ─────────────────────────────────────────────────
+# ── PANEL 4: LOWER WATERSHED ──────────────────────────────────────────────────
 _lo_max = LO_BANKFULL * 2.5
 st.markdown(f'<div class="lower-panel"><div class="lower-title">'
             f'LOWER CULLOWHEE CREEK ({LO_AREA_ACRES:,} AC | {LO_DA_SQMI:.2f} mi²)</div>',
@@ -1657,7 +1652,7 @@ l1, l2, l3 = st.columns([2, 2, 3])
 with l1:
     st.components.v1.html(make_stream_gauge(
         "g_lo_depth", st.session_state.lo_depth, 0.0, _lo_max, " ft",
-        [{"range":[0.0,          LO_BANKFULL*0.60],"color":"rgba(0,255,156,0.15)"},
+        [{"range":[0.0,             LO_BANKFULL*0.60],"color":"rgba(0,255,156,0.15)"},
          {"range":[LO_BANKFULL*0.60,LO_BANKFULL*0.95],"color":"rgba(255,215,0,0.20)"},
          {"range":[LO_BANKFULL*0.95,_lo_max],         "color":"rgba(255,51,51,0.25)"}],
         lo_depth_clr, lo_depth_lbl, lo_depth_clr,
@@ -1666,7 +1661,7 @@ with l2:
     _lo_q_max = LO_BANKFULL_Q * 3.0
     st.components.v1.html(make_stream_gauge(
         "g_lo_flow", st.session_state.lo_flow, 0.0, _lo_q_max, " cfs",
-        [{"range":[0.0,             LO_BANKFULL_Q*0.45],"color":"rgba(0,255,156,0.15)"},
+        [{"range":[0.0,              LO_BANKFULL_Q*0.45],"color":"rgba(0,255,156,0.15)"},
          {"range":[LO_BANKFULL_Q*0.45,LO_BANKFULL_Q*0.95],"color":"rgba(255,215,0,0.20)"},
          {"range":[LO_BANKFULL_Q*0.95,_lo_q_max],         "color":"rgba(255,51,51,0.25)"}],
         lo_flow_clr, lo_flow_lbl, lo_flow_clr,
@@ -1684,8 +1679,8 @@ with l3:
 </div>""", unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ── PANEL 5: WATERSHED COMPARISON ────────────────────────────────────────────
-st.markdown('<div class="panel"><div class="panel-title">WATERSHED COMPARISON &mdash; UPPER vs LOWER SUB-BASIN | CULLOWHEE CREEK</div>',
+# ── PANEL 5: WATERSHED COMPARISON ─────────────────────────────────────────────
+st.markdown('<div class="panel"><div class="panel-title">WATERSHED COMPARISON &mdash; UPPER vs LOWER SUB-BASIN</div>',
             unsafe_allow_html=True)
 dq     = round(st.session_state.lo_flow  - st.session_state.up_flow,  1)
 dd     = round(st.session_state.lo_depth - st.session_state.up_depth, 2)
@@ -1727,15 +1722,14 @@ with tw2:
                     use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ── PANEL 5B: USGS TUCKASEGEE REFERENCE GAGE ─────────────────────────────────
-st.markdown('<div class="panel"><div class="panel-title">USGS 03508050 — TUCKASEGEE RIVER AT SR 1172 NR CULLOWHEE &nbsp;|&nbsp; REFERENCE GAGE</div>', unsafe_allow_html=True)
-
+# ── PANEL 5B: USGS TUCKASEGEE REFERENCE GAGE ──────────────────────────────────
+st.markdown('<div class="panel"><div class="panel-title">USGS 03508050 — TUCKASEGEE RIVER AT SR 1172 NR CULLOWHEE &nbsp;|&nbsp; REFERENCE GAGE</div>',
+            unsafe_allow_html=True)
 if usgs_tuck.get("ok"):
-    _tq    = usgs_tuck["discharge_cfs"]
-    _tgh   = usgs_tuck.get("gage_height_ft", 0)
-    _tscl  = usgs_tuck.get("cullowhee_scaled_cfs", 0)
-    _tage  = int(usgs_tuck.get("discharge_age_min", 0))
-    # Tuckasegee flood stage = 16 ft (NWS)
+    _tq   = usgs_tuck["discharge_cfs"]
+    _tgh  = usgs_tuck.get("gage_height_ft", 0)
+    _tscl = usgs_tuck.get("cullowhee_scaled_cfs", 0)
+    _tage = int(usgs_tuck.get("discharge_age_min", 0))
     _t_pct_flood = round(min(100, _tgh / 16.0 * 100), 1)
     _t_clr = ("#FF3333" if _tgh >= 14 else "#FF8800" if _tgh >= 10 else
               "#FFD700" if _tgh >= 7  else "#00FF9C")
@@ -1774,19 +1768,15 @@ if usgs_tuck.get("ok"):
 <div style="font-family:'Share Tech Mono',monospace;font-size:0.62em;color:#3A5A6A;
             margin-top:10px;text-align:right;">
   USGS 03508050 &nbsp;&middot;&nbsp; DA=147 mi² (Cullowhee Creek = 6.6% of watershed)
-  &nbsp;&middot;&nbsp; No gage exists on Cullowhee Creek — scaled for reference only
+  &nbsp;&middot;&nbsp; No gage on Cullowhee Creek — scaled for reference only
   &nbsp;&middot;&nbsp; Tuckasegee regulated by Duke Energy / Lake Glenville
 </div>""", unsafe_allow_html=True)
 else:
-    st.markdown(
-        '<div style="color:#FF8800;font-family:\'Share Tech Mono\',monospace;'
-        'font-size:0.8em;">USGS 03508050 UNAVAILABLE</div>',
-        unsafe_allow_html=True)
-
+    st.markdown('<div style="color:#FF8800;font-family:\'Share Tech Mono\',monospace;'
+                'font-size:0.8em;">USGS 03508050 UNAVAILABLE</div>', unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
-
-# ── PANEL 6: 7-DAY FLOOD OUTLOOK ─────────────────────────────────────────────
+# ── PANEL 6: 7-DAY FLOOD OUTLOOK ──────────────────────────────────────────────
 st.markdown('<div class="panel"><div class="panel-title">7-DAY FLOOD &amp; RAINFALL OUTLOOK &mdash; CULLOWHEE CREEK WATERSHED</div>',
             unsafe_allow_html=True)
 if not forecast:
@@ -1794,14 +1784,12 @@ if not forecast:
 else:
     pcols = st.columns(7)
     for i, d in enumerate(forecast[:7]):
-        # Day 0: weight observed rain heavily; future days: forecast-only
-        _obs_weight = max(0.0, 1.0 - i * 0.25)   # fades from 1.0→0 over 4 days
+        _obs_weight = max(0.0, 1.0 - i * 0.25)
         risk  = min(100.0, round(
             (soil_sat_lo * 0.35) +
             (min(100.0, rain_24h * 25) * _obs_weight * 0.20) +
             (d["pop"]    * (0.35 - _obs_weight * 0.10)) +
-            (d["qpf_in"] * 18 * (1.0 - _obs_weight * 0.15)),
-        1))
+            (d["qpf_in"] * 18 * (1.0 - _obs_weight * 0.15)), 1))
         color = "#00FF9C" if risk<30 else "#FFFF00" if risk<50 else "#FFD700" if risk<65 else "#FF8800" if risk<80 else "#FF3333"
         with pcols[i]:
             st.markdown(
@@ -1818,12 +1806,12 @@ else:
                 f'</div>', unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ── PANEL 7: RADAR ───────────────────────────────────────────────────────────
+# ── PANEL 7: RADAR ────────────────────────────────────────────────────────────
 st.markdown('<div class="panel"><div class="panel-title">RADAR LOOP</div>', unsafe_allow_html=True)
 _cb = int(time.time() / 120)
 st.components.v1.html(f"""
-<div style="background:#04090F;border-radius:10px;border:1px solid #1a2a3a;
-            overflow:hidden;font-family:'Courier New',monospace;">
+<div style="background:#04090F;border-radius:10px;border:1px solid #1a2a3a;overflow:hidden;
+            font-family:'Courier New',monospace;">
   <div style="display:flex;align-items:center;justify-content:space-between;
               padding:8px 16px;background:#0a1520;border-bottom:1px solid #1a3a5a;">
     <div style="display:flex;align-items:center;gap:10px;">
