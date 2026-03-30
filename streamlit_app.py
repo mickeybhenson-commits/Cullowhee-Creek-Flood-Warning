@@ -3,7 +3,7 @@ NOAH: Cullowhee Creek Flood Warning Dashboard
 Nautilus Technologies — Jackson County, NC — Watershed Monitoring System
 
 Precipitation source chain (priority order):
-  1.  Live sensor array          custom_json / weathercom_pws  (deploy target)
+  1.  Live sensor array          custom_json / Firestore (Blues Notecard)
   1.5 Ambient Weather Network    RiverBend on the Tuckasegee, Sylva NC
   2.  NWS K24A Observed          Jackson County Airport AWOS III P/T
   3.  Iowa Mesonet ASOS          24A / RHP / AVL
@@ -11,10 +11,22 @@ Precipitation source chain (priority order):
   5.  NWS grid QPE               forecastGridData reuse
   6.  ERA5 archive               last resort  (1-2 day lag)
 
-AWN SETUP (two keys required):
-  .streamlit/secrets.toml:
-    AWN_APP_KEY = "your_application_key"   # register free at ambientweather.net/account/create-app
-    AWN_API_KEY = "your_account_api_key"   # regenerate at ambientweather.net/account
+Extended data sources:
+  NWPS  — Tuckasegee at Bryson City river forecast (TKSN7)
+  MRMS  — NOAA Multi-Radar Multi-Sensor QPE via Iowa Mesonet
+  NASA  — POWER SMAP-derived soil moisture
+  ACIS  — NC State Climate Office PRISM daily climate
+  FIMAN — NC Flood Inundation Mapping & Alert Network (Jackson County)
+  GOES  — NOAA GOES-16 satellite imagery (Southeast sector)
+
+AWN SETUP (.streamlit/secrets.toml):
+  AWN_APP_KEY = "your_application_key"
+  AWN_API_KEY = "your_account_api_key"
+
+GCP / Firestore:
+  Project:  ee-dashboard-477704
+  Database: cullowhee
+  Collection: noah_sensor_data
 """
 
 import math
@@ -45,28 +57,24 @@ ET_TZ       = ZoneInfo("America/New_York")
 UTC_TZ      = ZoneInfo("UTC")
 REQ_TIMEOUT = 12
 
-# ── Tier 1: deployed sensor endpoints (fill when sensors are live) ─────────────
+# ── Tier 1: deployed sensor endpoints ─────────────────────────────────────────
 REALTIME_RAIN_STATIONS = [
-    {"name": "Primary Basin Rain",   "type": "custom_json",    "weight": 1.0,
+    {"name": "Primary Basin Rain",   "type": "custom_json", "weight": 1.0,
      "current_url": "", "history_url": ""},
-    {"name": "Secondary Basin Rain", "type": "custom_json",    "weight": 1.0,
+    {"name": "Secondary Basin Rain", "type": "custom_json", "weight": 1.0,
      "current_url": "", "history_url": ""},
 ]
 
-# ── Tier 1.5: Ambient Weather Network — RiverBend on the Tuckasegee, Sylva NC ─
+# ── Tier 1.5: Ambient Weather Network ─────────────────────────────────────────
 AWN_API_KEY      = "4112bd1931ce4b7a9ba75da04c237db348c6f56e18dc4616966bd3e6474fac04"
 AWN_APP_KEY      = "df7991f317694d6480b4510c3ef81cb3d6082fe19abd4f629eff2c2f93443284"
-AWN_STATION_NAME = "riverbend"   # substring match on device name/location (case-insensitive)
-AWN_STATION_MAC  = ""            # leave blank — auto-discovered; or hardcode MAC here
+AWN_STATION_NAME = "riverbend"
+AWN_STATION_MAC  = ""
 
-# ── Tier 2: NWS K24A — Jackson County Airport AWOS III P/T ────────────────────
-# ── Tier 3: Iowa Mesonet ASOS stations ────────────────────────────────────────
-# 24A = Jackson County Airport (~1 mi from WCU)
-# RHP = Andrews-Murphy Airport (~18 mi)
-# AVL = Asheville Regional (~35 mi, reliable fallback)
+# ── Tier 2-3: NWS + ASOS stations ─────────────────────────────────────────────
 ASOS_STATIONS = ["24A", "RHP", "AVL"]
 
-# Alert severity rank
+# ── Alert severity rank ────────────────────────────────────────────────────────
 ALERT_RANK = {
     "flash flood warning": 5, "flood warning": 5, "tornado warning": 5,
     "severe thunderstorm warning": 4,
@@ -75,18 +83,13 @@ ALERT_RANK = {
 }
 
 # ── Watershed / soil constants ─────────────────────────────────────────────────
-# SSURGO Jackson County NC — Evard-Cowee/Tuckasegee/Saunook/Codorus weighted avg
 SOIL_POROSITY  = 0.485
 SOIL_FIELD_CAP = 0.310
 SOIL_WILT_PT   = 0.138
 
-# Henson et al. (2014) Ecoregion 66 regional hydraulic geometry curves
-# USGS 03508050 Tuckasegee River at SR 1172 nr Cullowhee — DA=147 sq mi
 USGS_TUCK_SITE = "03508050"
 USGS_TUCK_DA   = 147.0
 
-# CN: NLCD 2019 × SSURGO HSG C (Evard-Cowee Ultisols)
-# Tc: TR-55 velocity method, forested mountain channel
 LO_AREA_ACRES = 6200;  LO_DA_SQMI = 9.688;  LO_TC_HRS = 2.5;  LO_CN_II = 72
 LO_RATING_A   = 36.4;  LO_RATING_B = 2.30;  LO_BASEFLOW = 15.4
 LO_BANKFULL   = 2.64;  LO_BANKFULL_Q = 339.0
@@ -95,7 +98,7 @@ UP_AREA_ACRES = 2480;  UP_DA_SQMI = 3.875;  UP_TC_HRS = 1.2;  UP_CN_II = 70
 UP_RATING_A   = 39.1;  UP_RATING_B = 2.15;  UP_BASEFLOW = 6.2
 UP_BANKFULL   = 1.96;  UP_BANKFULL_Q = 166.0
 
-RECESSION_K      = 0.046   # /day — USGS StreamStats NC Blue Ridge RI=50d
+RECESSION_K      = 0.046
 FLOOD_TRAVEL_MIN = 65
 
 _USDM_IMPLIED_SAT = {1: 55.0, 2: 40.0, 3: 27.0, 4: 17.0, 5: 8.0}
@@ -181,7 +184,6 @@ def _fetch_short_range_hourly():
 
 @st.cache_data(ttl=1800)
 def _fetch_daily_forecast():
-    """Fetches NWS grid; also stores grid props in session_state for QPE reuse."""
     try:
         hdrs = {"User-Agent": "NOAH-FloodWarning/1.0"}
         pts  = requests.get(f"https://api.weather.gov/points/{LAT},{LON}",
@@ -194,7 +196,6 @@ def _fetch_daily_forecast():
             st.session_state["_nws_grid_props"] = grid
         except Exception:
             pass
-
         qpf_by_date = defaultdict(float)
         for e in grid.get("quantitativePrecipitation", {}).get("values", []):
             vt = e["validTime"].split("/")[0]
@@ -203,7 +204,6 @@ def _fetch_daily_forecast():
                 qpf_by_date[d] += float(e["value"] or 0) * 0.0393701
             except Exception:
                 pass
-
         temp_by_date = {}
         for e in grid.get("maxTemperature", {}).get("values", []):
             vt, val = e["validTime"].split("/")[0], e["value"]
@@ -216,7 +216,6 @@ def _fetch_daily_forecast():
                     temp_by_date[d] = tf
             except Exception:
                 pass
-
         out, seen = [], set()
         for p in periods:
             if not p.get("isDaytime", False):
@@ -242,7 +241,6 @@ def _fetch_daily_forecast():
         return []
 
 def _qpf_next_hours(n_hours=6):
-    """Sum QPF for the next n_hours only — avoids double-counting observed rain."""
     hourly = _fetch_short_range_hourly()
     now_et = datetime.now(ET_TZ)
     total  = 0.0
@@ -256,13 +254,11 @@ def _build_unified_forecast():
     now_et = datetime.now(ET_TZ)
     hourly = _fetch_short_range_hourly()
     daily  = _fetch_daily_forecast()
-
     hourly_by_day = defaultdict(list)
     for r in hourly:
         lead = _hours_ahead(r["time"], now_et)
         if -3 <= lead <= 60:
             hourly_by_day[r["time"].strftime("%Y-%m-%d")].append(r)
-
     short_daily = {}
     for dkey, rows in hourly_by_day.items():
         dt = datetime.strptime(dkey, "%Y-%m-%d").replace(tzinfo=ET_TZ, hour=12)
@@ -273,7 +269,6 @@ def _build_unified_forecast():
                              "qpf_in": round(sum(r["qpf_in"] for r in rows), 2),
                              "pop":    round(max(r["pop"]    for r in rows), 1),
                              "icon_txt": ""}
-
     daily_map = {r["date"]: r for r in daily}
     unified   = []
     for dkey in sorted(set(short_daily) | set(daily_map)):
@@ -301,7 +296,6 @@ def _build_unified_forecast():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _cp(x, lo=0.0, hi=50.0):
-    """Clean precip value — return float in [lo, hi] or None."""
     try:
         v = float(x)
         return None if (math.isnan(v) or v < lo or v > hi) else v
@@ -309,59 +303,27 @@ def _cp(x, lo=0.0, hi=50.0):
         return None
 
 def _sp(pairs, max_age_hr):
-    """Sum (age_hr, precip_in) pairs where 0 <= age_hr <= max_age_hr."""
     return round(sum(p for a, p in pairs if 0 <= a <= max_age_hr), 3)
 
 
-# ── Tier 1.5: Ambient Weather Network — RiverBend on the Tuckasegee ──────────
-
-@st.cache_data(ttl=60)   # AWN updates every ~1 min
+@st.cache_data(ttl=60)
 def _fetch_ambient_weather() -> dict:
-    """
-    Ambient Weather Network subscription API — RiverBend on the Tuckasegee, Sylva NC.
-
-    AWN REST API v1 requires TWO keys:
-      applicationKey — registered app at ambientweather.net/account/create-app
-      apiKey         — your account API key at ambientweather.net/account
-
-    Step 1: GET /v1/devices       → discover MAC address for AWN_STATION_NAME
-    Step 2: GET /v1/devices/{mac} → pull last 288 records (~24h at 5-min intervals)
-
-    Key AWN fields used:
-      hourlyrainin   — current rain rate (in/hr) — RATE not accumulation
-      dailyrainin    — rain since midnight local
-      weeklyrainin   — rolling 7-day accumulation
-      eventrainin    — rain this event
-      tempf, humidity, windspeedmph, windgustmph, baromrelin
-
-    Rate → accumulation: each 5-min record spans 1/12 hr,
-    so interval_in = hourlyrainin / 12.0
-    """
     if not AWN_API_KEY:
-        log.warning("AWN_API_KEY not set — skipping AWN")
         return {"ok": False, "source": "AWN-no-api-key"}
-
-    # Build params — include app key only if available
     base_params = {"apiKey": AWN_API_KEY}
     if AWN_APP_KEY:
         base_params["applicationKey"] = AWN_APP_KEY
-    hdrs        = {"User-Agent": "NOAH-FloodWarning/1.0 (Nautilus Technologies)"}
-
-    # ── Step 1: discover device list and locate RiverBend station ────────────
+    hdrs = {"User-Agent": "NOAH-FloodWarning/1.0 (Nautilus Technologies)"}
     try:
         resp    = requests.get("https://api.ambientweather.net/v1/devices",
                                params=base_params, headers=hdrs, timeout=REQ_TIMEOUT)
         resp.raise_for_status()
         devices = resp.json()
     except Exception as exc:
-        log.error("AWN device list request failed: %s", exc)
         return {"ok": False, "source": "AWN-device-list-failed", "reason": str(exc)}
-
     if not isinstance(devices, list) or not devices:
         return {"ok": False, "source": "AWN-empty-device-list"}
-
-    # Locate MAC for RiverBend — match on name OR location field
-    mac       = AWN_STATION_MAC
+    mac = AWN_STATION_MAC
     last_data = {}
     if not mac:
         for dev in devices:
@@ -369,99 +331,69 @@ def _fetch_ambient_weather() -> dict:
             name_str = str(info.get("name", "") or "").lower()
             loc_str  = str(info.get("location", "") or "").lower()
             if AWN_STATION_NAME.lower() in name_str or AWN_STATION_NAME.lower() in loc_str:
-                mac       = dev.get("macAddress", "")
+                mac = dev.get("macAddress", "")
                 last_data = dev.get("lastData", {})
                 break
-        # Fallback: single-device account — use first device
         if not mac and len(devices) == 1:
-            mac       = devices[0].get("macAddress", "")
+            mac = devices[0].get("macAddress", "")
             last_data = devices[0].get("lastData", {})
-            log.info("AWN: using sole registered device MAC=%s", mac)
         if not mac:
             names = [d.get("info", {}).get("name", "?") for d in devices]
-            log.warning("AWN: no station matching '%s' in %s", AWN_STATION_NAME, names)
             return {"ok": False, "source": "AWN-station-not-found",
                     "reason": f"Searched for '{AWN_STATION_NAME}' in {names}"}
     else:
-        # MAC was hardcoded — pull lastData from device list if available
         for dev in devices:
             if dev.get("macAddress") == mac:
                 last_data = dev.get("lastData", {})
                 break
-
-    # ── Step 2: pull historical records for sliding-window totals ─────────────
-    # limit=288: 288 × 5-min intervals = 24 hours of high-resolution records
-    # For 7-day totals we rely on AWN's own weeklyrainin field (cross-check below)
     try:
         hist_resp = requests.get(
             f"https://api.ambientweather.net/v1/devices/{mac}",
             params={**base_params, "limit": 288},
-            headers=hdrs, timeout=REQ_TIMEOUT
-        )
+            headers=hdrs, timeout=REQ_TIMEOUT)
         hist_resp.raise_for_status()
         hist = hist_resp.json()
-    except Exception as exc:
-        log.error("AWN history fetch failed for MAC %s: %s", mac, exc)
-        # Fall back to lastData only — less precise but still useful
+    except Exception:
         hist = []
-
-    # ── Build sliding-window precipitation totals ─────────────────────────────
     now_et = datetime.now(ET_TZ)
-    pairs  = []   # (age_hr, precip_in_per_5min_interval)
-
+    pairs  = []
     for rec in (hist if isinstance(hist, list) else []):
         epoch_ms = rec.get("dateutc")
         if epoch_ms is None:
             continue
         try:
-            ts_et  = datetime.fromtimestamp(int(epoch_ms) / 1000,
-                                            tz=UTC_TZ).astimezone(ET_TZ)
+            ts_et  = datetime.fromtimestamp(int(epoch_ms)/1000, tz=UTC_TZ).astimezone(ET_TZ)
             age_hr = (now_et - ts_et).total_seconds() / 3600.0
             if age_hr < 0:
                 continue
         except Exception:
             continue
-        # AWN hourlyrainin is a RATE (in/hr) — convert to 5-min accumulation
         rate = _cp(rec.get("hourlyrainin"), 0, 15)
         if rate is not None:
             pairs.append((age_hr, rate / 12.0))
-
-    # Quality gate: if we have records and all are zero, sensor may be offline
     n_obs   = len(pairs)
     r7_hist = _sp(pairs, 168) if pairs else 0.0
     prcp_ok = not (n_obs >= 50 and r7_hist == 0.0)
-
-    # ── Extract current-conditions from lastData ───────────────────────────────
     def _ld(key, lo=-9999, hi=9999):
         return _cp(last_data.get(key), lo, hi)
-
-    _rate_now  = _ld("hourlyrainin",   0, 15)
-    _awn_daily = _ld("dailyrainin",    0, 30)   # since midnight local
-    _awn_week  = _ld("weeklyrainin",   0, 60)   # rolling 7-day
-    _awn_event = _ld("eventrainin",    0, 30)   # current event total
-
+    _rate_now  = _ld("hourlyrainin", 0, 15)
+    _awn_daily = _ld("dailyrainin",  0, 30)
+    _awn_week  = _ld("weeklyrainin", 0, 60)
+    _awn_event = _ld("eventrainin",  0, 30)
     current = {
-        "tempf":        _ld("tempf",       -40, 130),
-        "humidity":     _ld("humidity",      0, 100),
-        "windspeedmph": _ld("windspeedmph",  0, 200),
-        "windgustmph":  _ld("windgustmph",   0, 200),
-        "baromrelin":   _ld("baromrelin",   20,  35),
+        "tempf":        _ld("tempf",      -40, 130),
+        "humidity":     _ld("humidity",     0, 100),
+        "windspeedmph": _ld("windspeedmph", 0, 200),
+        "windgustmph":  _ld("windgustmph",  0, 200),
+        "baromrelin":   _ld("baromrelin",  20,  35),
     }
-
-    # ── Build output: prefer AWN rolling totals, cross-check with history ─────
-    # Take MAX of computed history vs AWN's own rolling total (more reliable for
-    # longer windows where 288-record history doesn't reach)
     _r1h  = _sp(pairs,  1) if prcp_ok else None
     _r24h = _sp(pairs, 24) if prcp_ok else None
-    _r3d  = _sp(pairs, 72) if prcp_ok else None
     _r7d  = r7_hist        if prcp_ok else None
-
-    # Cross-check AWN's own rolling totals
     if _awn_daily is not None:
         _r24h = max(_r24h, _awn_daily) if _r24h is not None else _awn_daily
     if _awn_week is not None:
         _r7d  = max(_r7d,  _awn_week)  if _r7d  is not None else _awn_week
-
     return {
         "ok":              True,
         "source":          "AWN-RiverBend",
@@ -471,7 +403,7 @@ def _fetch_ambient_weather() -> dict:
         "rain_event_in":   _awn_event,
         "rain_1h_in":      _r1h,
         "rain_24h_in":     _r24h,
-        "rain_3d_in":      _r3d,
+        "rain_3d_in":      _sp(pairs, 72)  if prcp_ok else None,
         "rain_5d_in":      _sp(pairs, 120) if prcp_ok else None,
         "rain_7d_in":      _r7d,
         "rain_14d_in":     None,
@@ -480,49 +412,35 @@ def _fetch_ambient_weather() -> dict:
     }
 
 
-# ── Tier 2: NWS K24A Observed Hourly Precip ───────────────────────────────────
-
 @st.cache_data(ttl=1200)
 def _fetch_nws_k24a() -> dict:
-    """
-    Hourly observations from NWS K24A (Jackson County Airport, AWOS III P/T).
-    No authentication required. ~20-min update cadence.
-    """
     try:
         hdrs = {"User-Agent": "NOAH-FloodWarning/1.0 (Nautilus Technologies)"}
-        r    = requests.get(
-            "https://api.weather.gov/stations/K24A/observations",
-            params={"limit": 288},
-            headers=hdrs, timeout=REQ_TIMEOUT,
-        ).json()
-
+        r    = requests.get("https://api.weather.gov/stations/K24A/observations",
+                            params={"limit": 288}, headers=hdrs, timeout=REQ_TIMEOUT).json()
         features = r.get("features", [])
         if not features:
             return {"ok": False, "source": "NWS-K24A", "reason": "no features"}
-
         now_et = datetime.now(ET_TZ)
         pairs  = []
         latest = {}
-
         for feat in features:
             props  = feat.get("properties", {})
             ts_str = props.get("timestamp", "")
             if not ts_str:
                 continue
             try:
-                ts_et  = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).astimezone(ET_TZ)
+                ts_et  = datetime.fromisoformat(ts_str.replace("Z","+00:00")).astimezone(ET_TZ)
                 age_hr = (now_et - ts_et).total_seconds() / 3600.0
                 if age_hr < 0:
                     continue
             except Exception:
                 continue
-
             p_mm = (props.get("precipitationLastHour") or {}).get("value")
             if p_mm is not None:
                 p_in = _cp(float(p_mm) * 0.0393701, 0, 5)
                 if p_in is not None:
                     pairs.append((age_hr, p_in))
-
             if not latest and age_hr < 2:
                 t_c      = (props.get("temperature")      or {}).get("value")
                 w_kph    = (props.get("windSpeed")        or {}).get("value")
@@ -530,32 +448,26 @@ def _fetch_nws_k24a() -> dict:
                 p_hpa    = (props.get("seaLevelPressure") or {}).get("value")
                 gust_kph = (props.get("windGust")         or {}).get("value")
                 latest   = {
-                    "tempf":        round(float(t_c) * 9/5 + 32, 1)      if t_c      is not None else None,
-                    "windspeedmph": round(float(w_kph) * 0.621371, 1)    if w_kph    is not None else None,
-                    "windgustmph":  round(float(gust_kph) * 0.621371, 1) if gust_kph is not None else None,
-                    "humidity":     round(float(h_pct), 1)                if h_pct    is not None else None,
-                    "baromrelin":   round(float(p_hpa) * 0.02953, 2)     if p_hpa    is not None else None,
+                    "tempf":        round(float(t_c)*9/5+32, 1)        if t_c      is not None else None,
+                    "windspeedmph": round(float(w_kph)*0.621371, 1)    if w_kph    is not None else None,
+                    "windgustmph":  round(float(gust_kph)*0.621371, 1) if gust_kph is not None else None,
+                    "humidity":     round(float(h_pct), 1)              if h_pct    is not None else None,
+                    "baromrelin":   round(float(p_hpa)*0.02953, 2)     if p_hpa    is not None else None,
                 }
-
         if not pairs:
             return {"ok": False, "source": "NWS-K24A", "reason": "no precip observations"}
-
-        n_obs   = len(pairs)
         r7      = _sp(pairs, 168)
-        prcp_ok = not (n_obs >= 12 and r7 == 0.0)
-
-        _recent      = next(((age, p) for age, p in pairs if age <= 2.0), None)
-        _recent_rate = round(_recent[1], 3) if _recent else 0.0
-
+        prcp_ok = not (len(pairs) >= 12 and r7 == 0.0)
+        _recent = next(((age, p) for age, p in pairs if age <= 2.0), None)
         return {
             "ok":              True,
             "source":          "NWS-K24A",
-            "rain_rate_in_hr": _recent_rate,
-            "rain_1h_in":      _sp(pairs,  1)   if prcp_ok else None,
-            "rain_24h_in":     _sp(pairs, 24)   if prcp_ok else None,
-            "rain_3d_in":      _sp(pairs, 72)   if prcp_ok else None,
-            "rain_5d_in":      _sp(pairs, 120)  if prcp_ok else None,
-            "rain_7d_in":      r7               if prcp_ok else None,
+            "rain_rate_in_hr": round(_recent[1], 3) if _recent else 0.0,
+            "rain_1h_in":      _sp(pairs,  1)  if prcp_ok else None,
+            "rain_24h_in":     _sp(pairs, 24)  if prcp_ok else None,
+            "rain_3d_in":      _sp(pairs, 72)  if prcp_ok else None,
+            "rain_5d_in":      _sp(pairs, 120) if prcp_ok else None,
+            "rain_7d_in":      r7              if prcp_ok else None,
             "rain_14d_in":     None,
             "snow_7d_in":      None,
             **{k: v for k, v in latest.items() if v is not None},
@@ -563,8 +475,6 @@ def _fetch_nws_k24a() -> dict:
     except Exception as exc:
         return {"ok": False, "source": "NWS-K24A", "reason": str(exc)}
 
-
-# ── Tier 3: Iowa Mesonet ASOS ─────────────────────────────────────────────────
 
 @st.cache_data(ttl=300)
 def _fetch_asos(station="RHP"):
@@ -601,14 +511,13 @@ def _fetch_asos(station="RHP"):
                 continue
             try:
                 obs = datetime.strptime(parts[1].strip(), "%Y-%m-%d %H:%M").replace(tzinfo=UTC_TZ)
-                pairs.append(((now_et - obs.astimezone(ET_TZ)).total_seconds() / 3600.0, p))
+                pairs.append(((now_et - obs.astimezone(ET_TZ)).total_seconds()/3600.0, p))
             except Exception:
                 continue
         if not pairs:
             return {"ok": False, "source": f"ASOS-{station}"}
         r7      = _sp(pairs, 168)
-        n_obs   = len(pairs)
-        prcp_ok = not (n_obs >= 50 and r7 == 0.0)
+        prcp_ok = not (len(pairs) >= 50 and r7 == 0.0)
         return {"ok": True, "source": f"ASOS-{station}",
                 "rain_rate_in_hr": None,
                 "rain_1h_in":  _sp(pairs,  1)  if prcp_ok else None,
@@ -628,8 +537,6 @@ def _fetch_asos_best():
     return {"ok": False, "source": "ASOS-all-failed"}
 
 
-# ── Tier 4: Open-Meteo forecast model w/ past_days ────────────────────────────
-
 @st.cache_data(ttl=600)
 def _fetch_openmeteo_recent():
     try:
@@ -639,17 +546,15 @@ def _fetch_openmeteo_recent():
             "precipitation_unit": "inch",
             "past_days": 14, "forecast_days": 1, "models": "best_match",
         }, timeout=REQ_TIMEOUT).json()
-
         times    = r["hourly"]["time"]
         precip_h = r["hourly"].get("precipitation", [])
-        snow_h   = r["hourly"].get("snowfall", [0] * len(times))
+        snow_h   = r["hourly"].get("snowfall", [0]*len(times))
         now_et   = datetime.now(ET_TZ)
         pairs, snow_pairs = [], []
-
         for i, t in enumerate(times):
             try:
                 dt_utc = datetime.fromisoformat(t).replace(tzinfo=UTC_TZ)
-                age_hr = (now_et - dt_utc.astimezone(ET_TZ)).total_seconds() / 3600.0
+                age_hr = (now_et - dt_utc.astimezone(ET_TZ)).total_seconds()/3600.0
                 if age_hr < 0:
                     continue
             except Exception:
@@ -658,7 +563,6 @@ def _fetch_openmeteo_recent():
             s = (_cp(snow_h[i]   if i < len(snow_h)   else None, 0, 30) or 0.0) * 0.0393701
             pairs.append((age_hr, p))
             snow_pairs.append((age_hr, s))
-
         if not pairs:
             return {"ok": False, "source": "OpenMeteo-forecast"}
         return {"ok": True, "source": "OpenMeteo-forecast",
@@ -670,8 +574,6 @@ def _fetch_openmeteo_recent():
     except Exception as exc:
         return {"ok": False, "source": "OpenMeteo-forecast", "reason": str(exc)}
 
-
-# ── Tier 5: NWS forecastGridData QPE (free reuse from daily forecast fetch) ───
 
 def _parse_nws_qpe(grid_props):
     try:
@@ -690,7 +592,7 @@ def _parse_nws_qpe(grid_props):
                     continue
                 hrly_in = float(val_mm) * 0.0393701 / max(dur_hrs, 1.0)
                 for h in range(int(dur_hrs)):
-                    age_hr = (now_et - (dt_et + timedelta(hours=h))).total_seconds() / 3600.0
+                    age_hr = (now_et - (dt_et + timedelta(hours=h))).total_seconds()/3600.0
                     if age_hr >= 0:
                         pairs.append((age_hr, hrly_in))
             except Exception:
@@ -707,8 +609,6 @@ def _parse_nws_qpe(grid_props):
         return {"ok": False, "source": "NWS-grid-QPE"}
 
 
-# ── Tier 6: ERA5 archive (last resort, 1-2 day lag) ───────────────────────────
-
 @st.cache_data(ttl=3600)
 def _fetch_era5():
     try:
@@ -721,16 +621,15 @@ def _fetch_era5():
             "start_date": start_dt.strftime("%Y-%m-%d"),
             "end_date":   end_dt.strftime("%Y-%m-%d"),
         }, timeout=15).json()
-
         times    = r["hourly"]["time"]
         precip_h = r["hourly"].get("precipitation", [])
-        snow_h   = r["hourly"].get("snowfall", [0] * len(times))
+        snow_h   = r["hourly"].get("snowfall", [0]*len(times))
         now_et   = datetime.now(ET_TZ)
         pairs, snow_pairs = [], []
         for i, t in enumerate(times):
             try:
                 dt_utc = datetime.fromisoformat(t).replace(tzinfo=UTC_TZ)
-                age_hr = (now_et - dt_utc.astimezone(ET_TZ)).total_seconds() / 3600.0
+                age_hr = (now_et - dt_utc.astimezone(ET_TZ)).total_seconds()/3600.0
                 if age_hr < 0:
                     continue
             except Exception:
@@ -755,14 +654,7 @@ def _fetch_era5():
                 "snow_7d_in": 0.0}
 
 
-# ── Merge helper ──────────────────────────────────────────────────────────────
-
 def _fill(primary, secondary):
-    """
-    Merge two precip dicts.
-      rain_rate_in_hr : primary wins (most real-time source first)
-      all accumulations: MAX across both — a broken zero must never beat real rain
-    """
     out = dict(primary)
     if out.get("rain_rate_in_hr") is None and secondary.get("rain_rate_in_hr") is not None:
         out["rain_rate_in_hr"] = secondary["rain_rate_in_hr"]
@@ -777,67 +669,42 @@ def _fill(primary, secondary):
     return out
 
 
-# ── Orchestrator ──────────────────────────────────────────────────────────────
-
 def fetch_precip_best(nws_grid_props=None):
-    """
-    Walk the fallback chain and merge all available sources.
-    Chain order: AWN-RiverBend → NWS-K24A → ASOS → OpenMeteo → NWS-QPE → ERA5
-    """
     results, best = [], None
-
-    # 1.5 — Ambient Weather Network (RiverBend, Sylva)
     awn = _fetch_ambient_weather()
     if awn.get("ok"):
         results.append(awn)
         best = awn
-        log.info("AWN-RiverBend OK: rain_rate=%.3f rain_24h=%.2f",
-                 awn.get("rain_rate_in_hr", 0), awn.get("rain_24h_in", 0))
-    else:
-        log.warning("AWN-RiverBend unavailable: %s", awn.get("reason", "unknown"))
-
-    # 2 — NWS K24A
     k24a = _fetch_nws_k24a()
     if k24a.get("ok"):
         results.append(k24a)
         best = _fill(best, k24a) if best else k24a
-
-    # 3 — ASOS
     asos = _fetch_asos_best()
     if asos.get("ok"):
         results.append(asos)
         best = _fill(best, asos) if best else asos
-
-    # 4 — Open-Meteo forecast model
     om = _fetch_openmeteo_recent()
     if om.get("ok"):
         results.append(om)
         best = _fill(best, om) if best else om
-
-    # 5 — NWS grid QPE
     if nws_grid_props:
         nws = _parse_nws_qpe(nws_grid_props)
         if nws.get("ok"):
             results.append(nws)
             best = _fill(best, nws) if best else nws
-
-    # 6 — ERA5 (last resort or to fill long-window gaps)
     if best is None or best.get("rain_7d_in") is None:
         era5 = _fetch_era5()
         results.append(era5)
         best = _fill(best, era5) if best else era5
-
     if best is None:
         best = {"ok": False, "source": "ALL-FAILED",
                 "rain_rate_in_hr": None, "rain_1h_in": 0.0, "rain_24h_in": 0.0,
                 "rain_3d_in": 0.0, "rain_5d_in": 0.5, "rain_7d_in": 0.5,
                 "rain_14d_in": 2.0, "snow_7d_in": 0.0}
-
     for k in ["rain_rate_in_hr","rain_1h_in","rain_24h_in","rain_3d_in",
               "rain_5d_in","rain_7d_in","rain_14d_in","snow_7d_in"]:
         if best.get(k) is None:
             best[k] = 0.0
-
     best["ok"]      = True
     best["sources"] = [r["source"] for r in results if r.get("ok")]
     return best
@@ -862,42 +729,35 @@ def _precip_badge(station_rain, backup):
 
 @st.cache_data(ttl=300)
 def fetch_usgs_tuck_gage() -> dict:
-    """Live discharge + gage height from USGS 03508050 — no auth required."""
     try:
         r = requests.get(
             "https://waterservices.usgs.gov/nwis/iv/",
             params={"sites": USGS_TUCK_SITE, "parameterCd": "00060,00065",
                     "format": "json", "siteStatus": "active"},
             headers={"User-Agent": "NOAH-FloodWarning/1.0"},
-            timeout=REQ_TIMEOUT,
-        ).json()
-
+            timeout=REQ_TIMEOUT).json()
         ts_list = r.get("value", {}).get("timeSeries", [])
-        out     = {"ok": False, "site": USGS_TUCK_SITE}
-
+        out = {"ok": False, "site": USGS_TUCK_SITE}
         for ts in ts_list:
-            var_code = ts.get("variable", {}).get("variableCode", [{}])[0].get("value", "")
-            values   = ts.get("values", [{}])[0].get("value", [])
+            var_code = ts.get("variable",{}).get("variableCode",[{}])[0].get("value","")
+            values   = ts.get("values",[{}])[0].get("value",[])
             if not values:
                 continue
             latest  = values[-1]
             val     = _cp(latest.get("value"), -999, 999999)
             if val is None or val < 0:
                 continue
-            dt_str  = latest.get("dateTime", "")
             try:
-                obs_et  = datetime.fromisoformat(dt_str.replace("Z", "+00:00")).astimezone(ET_TZ)
-                age_min = (datetime.now(ET_TZ) - obs_et).total_seconds() / 60.0
+                obs_et  = datetime.fromisoformat(latest.get("dateTime","").replace("Z","+00:00")).astimezone(ET_TZ)
+                age_min = (datetime.now(ET_TZ) - obs_et).total_seconds()/60.0
             except Exception:
                 age_min = 999
-
             if var_code == "00060":
                 out["discharge_cfs"]        = round(val, 1)
                 out["discharge_age_min"]    = round(age_min, 0)
-                out["cullowhee_scaled_cfs"] = round(val * (LO_DA_SQMI / USGS_TUCK_DA), 1)
+                out["cullowhee_scaled_cfs"] = round(val*(LO_DA_SQMI/USGS_TUCK_DA), 1)
             elif var_code == "00065":
                 out["gage_height_ft"]       = round(val, 2)
-
         if out.get("discharge_cfs") is not None:
             out["ok"] = True
         return out
@@ -921,7 +781,7 @@ def fetch_current_conditions():
                 "wind":      round(float(r.get("wind_speed_10m", 0)), 1),
                 "wind_gust": round(float(r.get("wind_gusts_10m", 0)), 1),
                 "wind_dir":  round(float(r.get("wind_direction_10m", 0)), 1),
-                "press":     round(r.get("surface_pressure", 1013.25) * 0.02953, 2),
+                "press":     round(r.get("surface_pressure", 1013.25)*0.02953, 2),
                 "precip":    round(float(r.get("precipitation", 0)), 1),
                 "wcode":     r.get("weather_code", 0)}
     except Exception:
@@ -931,10 +791,6 @@ def fetch_current_conditions():
 
 @st.cache_data(ttl=600)
 def fetch_era5_soil_moisture():
-    """
-    Soil moisture from Open-Meteo FORECAST model with past_days=7 (~1 hr lag).
-    Layers: soil_moisture_0_to_7cm  and  soil_moisture_7_to_28cm  (m³/m³ VWC)
-    """
     try:
         r = requests.get("https://api.open-meteo.com/v1/forecast", params={
             "latitude": LAT, "longitude": LON,
@@ -945,7 +801,7 @@ def fetch_era5_soil_moisture():
         sm_07  = r["hourly"]["soil_moisture_0_to_7cm"]
         sm_728 = r["hourly"]["soil_moisture_7_to_28cm"]
         now_et = datetime.now(ET_TZ)
-        for i in range(len(times) - 1, -1, -1):
+        for i in range(len(times)-1, -1, -1):
             if sm_07[i] is None or sm_728[i] is None:
                 continue
             try:
@@ -976,7 +832,7 @@ def fetch_usdm_drought():
         if not r:
             return -1, "NO DATA", "---"
         rec      = r[-1]
-        map_date = rec.get("MapDate", "")[:10]
+        map_date = rec.get("MapDate","")[:10]
         for level, key in [(5,"D4"),(4,"D3"),(3,"D2"),(2,"D1"),(1,"D0")]:
             if float(rec.get(key, 0) or 0) >= 25.0:
                 return level, {1:"D0 ABNORMALLY DRY",2:"D1 MODERATE DROUGHT",
@@ -997,7 +853,7 @@ def fetch_active_alerts():
         alerts = []
         for feat in r.get("features", []):
             p     = feat.get("properties", {})
-            event = str(p.get("event", "")).strip()
+            event = str(p.get("event","")).strip()
             if not event:
                 continue
             desc = " ".join(str(p.get("description","")).split())
@@ -1034,7 +890,7 @@ def fetch_hwo():
             return None
         prod = requests.get(f"https://api.weather.gov/products/{graph[0]['id']}",
                             headers=hdrs, timeout=10).json()
-        raw  = prod.get("productText", "")
+        raw  = prod.get("productText","")
         if not raw:
             return None
         issued_str = ""
@@ -1066,6 +922,259 @@ def fetch_hwo():
         return {"issued": issued_str, "paragraphs": paras} if paras else None
     except Exception:
         return None
+
+
+# ── NEW: NWPS — Tuckasegee at Bryson City River Forecast ─────────────────────
+
+@st.cache_data(ttl=900)
+def fetch_nwps_tuckasegee() -> dict:
+    try:
+        hdrs = {"User-Agent": "NOAH-FloodWarning/1.0 (Nautilus Technologies)"}
+        r = requests.get(
+            "https://api.water.noaa.gov/nwps/v1/gauges/tksn7",
+            headers=hdrs, timeout=REQ_TIMEOUT).json()
+        out = {"ok": False, "source": "NWPS-TKSN7", "gauge": "Tuckasegee at Bryson City"}
+        flood_cats = r.get("flood", {})
+        out["stage_action_ft"]   = flood_cats.get("action")
+        out["stage_minor_ft"]    = flood_cats.get("minor")
+        out["stage_moderate_ft"] = flood_cats.get("moderate")
+        out["stage_major_ft"]    = flood_cats.get("major")
+        obs_list = r.get("observed", {}).get("data", [])
+        if obs_list:
+            latest_obs = obs_list[-1]
+            out["observed_stage_ft"]  = latest_obs.get("primary")
+            out["observed_flow_kcfs"] = latest_obs.get("secondary")
+            try:
+                obs_et = datetime.fromisoformat(
+                    latest_obs.get("validTime","").replace("Z","+00:00")).astimezone(ET_TZ)
+                out["observed_time"]    = obs_et.strftime("%b %d %I:%M %p")
+                out["observed_age_min"] = round((datetime.now(ET_TZ)-obs_et).total_seconds()/60.0, 0)
+            except Exception:
+                pass
+        fcst_list = r.get("forecast", {}).get("data", [])
+        if fcst_list:
+            peak_stage = max((f.get("primary") or 0.0 for f in fcst_list
+                              if f.get("primary") is not None), default=0.0)
+            out["forecast_peak_ft"] = round(peak_stage, 2)
+            for f in fcst_list:
+                if f.get("primary") == peak_stage:
+                    try:
+                        pk_et = datetime.fromisoformat(
+                            f.get("validTime","").replace("Z","+00:00")).astimezone(ET_TZ)
+                        out["forecast_peak_time"] = pk_et.strftime("%a %b %d %I %p")
+                    except Exception:
+                        pass
+                    break
+        obs_stage = out.get("observed_stage_ft", 0.0) or 0.0
+        minor     = out.get("stage_minor_ft",    99.0) or 99.0
+        moderate  = out.get("stage_moderate_ft", 99.0) or 99.0
+        action    = out.get("stage_action_ft",   99.0) or 99.0
+        if obs_stage >= moderate:
+            out["status"] = "MODERATE FLOOD"; out["status_clr"] = "#FF3333"
+        elif obs_stage >= minor:
+            out["status"] = "MINOR FLOOD";    out["status_clr"] = "#FF8800"
+        elif obs_stage >= action:
+            out["status"] = "ACTION STAGE";   out["status_clr"] = "#FFD700"
+        else:
+            out["status"] = "BELOW ACTION";   out["status_clr"] = "#00FF9C"
+        if out.get("observed_stage_ft") is not None:
+            out["ok"] = True
+        return out
+    except Exception as exc:
+        return {"ok": False, "source": "NWPS-TKSN7", "reason": str(exc)}
+
+
+# ── NEW: NOAA MRMS QPE via Iowa Environmental Mesonet ────────────────────────
+
+@st.cache_data(ttl=600)
+def fetch_mrms_qpe() -> dict:
+    try:
+        now_et = datetime.now(ET_TZ)
+        hdrs   = {"User-Agent": "NOAH-FloodWarning/1.0"}
+        rain_7d = 0.0
+        r24h    = 0.0
+        r48h    = 0.0
+        for i in range(7):
+            d_str = (now_et - timedelta(days=i)).strftime("%Y-%m-%d")
+            try:
+                r = requests.get(
+                    f"https://mesonet.agron.iastate.edu/iemre/daily/{d_str}/{LAT}/{LON}/json",
+                    headers=hdrs, timeout=8).json()
+                p_in = r.get("mrms_daily_precip_in") or r.get("daily_precip_in")
+                if p_in is not None:
+                    p_val = float(p_in)
+                    if not math.isnan(p_val) and 0.0 <= p_val <= 20.0:
+                        rain_7d += p_val
+                        if i == 0:
+                            r24h = p_val
+                        if i <= 1:
+                            r48h += p_val
+            except Exception:
+                continue
+        if rain_7d == 0.0 and r24h == 0.0:
+            return {"ok": False, "source": "MRMS-IEM", "reason": "no data"}
+        return {
+            "ok":          True,
+            "source":      "MRMS-IEM",
+            "rain_24h_in": round(r24h,  3),
+            "rain_48h_in": round(r48h,  3),
+            "rain_7d_in":  round(rain_7d, 3),
+            "as_of":       now_et.strftime("%Y-%m-%d"),
+        }
+    except Exception as exc:
+        return {"ok": False, "source": "MRMS-IEM", "reason": str(exc)}
+
+
+# ── NEW: NASA POWER — SMAP-derived soil moisture ─────────────────────────────
+
+@st.cache_data(ttl=3600)
+def fetch_nasa_power_soil() -> dict:
+    try:
+        end_dt   = date.today()
+        start_dt = end_dt - timedelta(days=10)
+        r = requests.get(
+            "https://power.larc.nasa.gov/api/temporal/daily/point",
+            params={
+                "parameters": "GWETTOP,GWETROOT,GWETPROF",
+                "community":  "AG",
+                "longitude":  LON,
+                "latitude":   LAT,
+                "start":      start_dt.strftime("%Y%m%d"),
+                "end":        end_dt.strftime("%Y%m%d"),
+                "format":     "JSON",
+            }, timeout=20).json()
+        params_data = r.get("properties",{}).get("parameter",{})
+        def _latest(d):
+            for k in sorted(d.keys(), reverse=True):
+                v = d[k]
+                try:
+                    fv = float(v)
+                    if not math.isnan(fv) and fv >= 0.0 and fv != -999.0:
+                        return round(fv, 4), k
+                except Exception:
+                    continue
+            return None, None
+        top_vwc,  top_date  = _latest(params_data.get("GWETTOP",  {}))
+        root_vwc, _         = _latest(params_data.get("GWETROOT", {}))
+        prof_vwc, _         = _latest(params_data.get("GWETPROF", {}))
+        if top_vwc is None:
+            return {"ok": False, "source": "NASA-POWER", "reason": "no valid soil data"}
+        return {
+            "ok":           True,
+            "source":       "NASA-POWER-SMAP",
+            "surface_vwc":  top_vwc,
+            "rootzone_vwc": root_vwc,
+            "profile_vwc":  prof_vwc,
+            "sat_pct":      round(top_vwc * 100.0, 1),
+            "as_of":        top_date,
+        }
+    except Exception as exc:
+        return {"ok": False, "source": "NASA-POWER", "reason": str(exc)}
+
+
+# ── NEW: NC State Climate Office — ACIS/PRISM Climate Data ───────────────────
+
+@st.cache_data(ttl=3600)
+def fetch_ncstate_climate() -> dict:
+    try:
+        end_dt   = date.today()
+        start_dt = end_dt - timedelta(days=30)
+        r = requests.post(
+            "https://data.rcc-acis.org/GridData",
+            json={
+                "loc":    f"{LON},{LAT}",
+                "grid":   "21",
+                "sdate":  start_dt.strftime("%Y-%m-%d"),
+                "edate":  end_dt.strftime("%Y-%m-%d"),
+                "elems":  [{"name": "pcpn"}, {"name": "maxt"}, {"name": "mint"}],
+                "output": "json",
+            }, timeout=15).json()
+        data_rows = r.get("data", [])
+        if not data_rows:
+            return {"ok": False, "source": "ACIS-PRISM", "reason": "no data"}
+        now_et = datetime.now(ET_TZ)
+        daily  = []
+        for row in data_rows:
+            if len(row) < 2:
+                continue
+            d_str = row[0]
+            try:
+                raw_p = str(row[1]) if len(row) > 1 else "M"
+                pcpn = (0.001 if raw_p == "T"
+                        else float(raw_p) if raw_p not in ("M","S","") else None)
+                if pcpn is not None and not math.isnan(pcpn) and pcpn >= 0:
+                    dt    = datetime.strptime(d_str, "%Y-%m-%d")
+                    age_d = (now_et.date() - dt.date()).days
+                    maxt  = float(row[2]) if len(row) > 2 and str(row[2]) not in ("M","") else None
+                    mint  = float(row[3]) if len(row) > 3 and str(row[3]) not in ("M","") else None
+                    daily.append({"date": d_str, "age_d": age_d,
+                                  "pcpn_in": round(pcpn, 3),
+                                  "maxt_f":  round(maxt, 1) if maxt else None,
+                                  "mint_f":  round(mint, 1) if mint else None})
+            except Exception:
+                continue
+        if not daily:
+            return {"ok": False, "source": "ACIS-PRISM", "reason": "parse failed"}
+        r7d  = sum(d["pcpn_in"] for d in daily if d["age_d"] <= 7)
+        r14d = sum(d["pcpn_in"] for d in daily if d["age_d"] <= 14)
+        r30d = sum(d["pcpn_in"] for d in daily)
+        _monthly_normal = 4.0
+        recent = sorted([d for d in daily if d["age_d"] <= 7], key=lambda x: x["date"])
+        return {
+            "ok":             True,
+            "source":         "ACIS-PRISM",
+            "rain_7d_in":     round(r7d,  3),
+            "rain_14d_in":    round(r14d, 3),
+            "rain_30d_in":    round(r30d, 3),
+            "monthly_normal": _monthly_normal,
+            "departure_30d":  round(r30d - _monthly_normal, 2),
+            "recent_daily":   recent[-7:],
+            "latest_date":    daily[-1]["date"] if daily else "---",
+        }
+    except Exception as exc:
+        return {"ok": False, "source": "ACIS-PRISM", "reason": str(exc)}
+
+
+# ── NEW: NC FIMAN — Jackson County Flood Inundation Alert Network ─────────────
+
+@st.cache_data(ttl=300)
+def fetch_fiman_jackson() -> dict:
+    try:
+        hdrs = {"User-Agent": "NOAH-FloodWarning/1.0"}
+        r = requests.get(
+            "https://fiman.nc.gov/fiman/GaugeData",
+            params={"county": "Jackson", "format": "json"},
+            headers=hdrs, timeout=REQ_TIMEOUT)
+        if r.status_code == 200:
+            gauges = r.json()
+            out = {"ok": True, "source": "FIMAN", "gauges": []}
+            for g in (gauges if isinstance(gauges, list) else []):
+                out["gauges"].append({
+                    "name":   g.get("GaugeName","") or g.get("name",""),
+                    "stage":  g.get("Stage","")     or g.get("stage"),
+                    "precip": g.get("Precip","")    or g.get("precip"),
+                    "status": g.get("Status","")    or g.get("status",""),
+                })
+            return out
+        else:
+            return {"ok": False, "source": "FIMAN", "reason": f"HTTP {r.status_code}",
+                    "map_url": "https://fiman.nc.gov/fiman/", "link_only": True}
+    except Exception as exc:
+        return {"ok": False, "source": "FIMAN", "reason": str(exc),
+                "map_url": "https://fiman.nc.gov/fiman/", "link_only": True}
+
+
+# ── NEW: NOAA GOES-16 Satellite Imagery ──────────────────────────────────────
+
+def get_goes16_urls() -> dict:
+    _cb = int(time.time() / 300)
+    return {
+        "geocolor": f"https://cdn.star.nesdis.noaa.gov/GOES16/ABI/SECTOR/se/GEOCOLOR/latest.jpg?v={_cb}",
+        "ir_clean": f"https://cdn.star.nesdis.noaa.gov/GOES16/ABI/SECTOR/se/13/latest.jpg?v={_cb}",
+        "visible":  f"https://cdn.star.nesdis.noaa.gov/GOES16/ABI/SECTOR/se/02/latest.jpg?v={_cb}",
+        "wv":       f"https://cdn.star.nesdis.noaa.gov/GOES16/ABI/SECTOR/se/08/latest.jpg?v={_cb}",
+        "source":   "NOAA GOES-16 CDN",
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1138,7 +1247,7 @@ def fetch_realtime_stations():
 
 def calc_era5_sat_pct(sm_07, sm_728):
     sm_avg = min((min(sm_07,SOIL_POROSITY)*0.55)+(min(sm_728,SOIL_POROSITY)*0.45), SOIL_POROSITY)
-    return round(min(100.0, max(0.0, (sm_avg - SOIL_WILT_PT) / (SOIL_POROSITY - SOIL_WILT_PT) * 100)), 1)
+    return round(min(100.0, max(0.0, (sm_avg-SOIL_WILT_PT)/(SOIL_POROSITY-SOIL_WILT_PT)*100)), 1)
 
 def calc_api_sat_pct(rain_5d):
     a = min(float(rain_5d), 5.0)
@@ -1150,32 +1259,23 @@ def calc_api_sat_pct(rain_5d):
     return round(min(90.0, max(5.0, sat)), 1)
 
 def calc_soil_sat_ensemble(sm_07, sm_728, sm_ok, rain_5d, usdm_level):
-    """
-    Weighted ensemble: ERA5 model VWC + antecedent precip index + USDM context.
-    USDM is informational only — never hard-caps saturation during active storms.
-    """
     api_pct  = calc_api_sat_pct(rain_5d)
     era5_pct = calc_era5_sat_pct(sm_07, sm_728) if (sm_ok and sm_07 is not None) else None
     usdm_pct = _USDM_IMPLIED_SAT.get(usdm_level) if usdm_level >= 1 else None
-
     if usdm_level <= 0:   w_era5, w_api, w_usdm = 0.55, 0.45, 0.0
     elif usdm_level == 1: w_era5, w_api, w_usdm = 0.45, 0.45, 0.10
     elif usdm_level == 2: w_era5, w_api, w_usdm = 0.40, 0.45, 0.15
     else:                 w_era5, w_api, w_usdm = 0.35, 0.50, 0.15
-
     if era5_pct is None:
         w_api += w_era5; w_era5 = 0.0; era5_pct = api_pct
     if usdm_pct is None:
         w_api += w_usdm; w_usdm = 0.0; usdm_pct = api_pct
-
     sat_pct = round(min(100.0, max(1.0,
-        era5_pct * w_era5 + api_pct * w_api + usdm_pct * w_usdm)), 1)
-
+        era5_pct*w_era5 + api_pct*w_api + usdm_pct*w_usdm)), 1)
     if sm_ok and sm_07 is not None:
-        stored = round((min(sm_07,SOIL_POROSITY)*2.756) + (min(sm_728,SOIL_POROSITY)*8.268), 2)
+        stored = round((min(sm_07,SOIL_POROSITY)*2.756)+(min(sm_728,SOIL_POROSITY)*8.268), 2)
     else:
-        stored = round((sat_pct / 100.0) * (SOIL_POROSITY * 11.024), 2)
-
+        stored = round((sat_pct/100.0)*(SOIL_POROSITY*11.024), 2)
     color = "#FF3333" if sat_pct>85 else "#FF8800" if sat_pct>70 else "#FFD700" if sat_pct>50 else "#00FF9C"
     return sat_pct, stored, color
 
@@ -1194,7 +1294,7 @@ def _tr55_unit_peak(tc_hrs, ia_p):
                 C1 = _TR55_C1[i]+t*(_TR55_C1[i+1]-_TR55_C1[i])
                 C2 = _TR55_C2[i]+t*(_TR55_C2[i+1]-_TR55_C2[i])
                 break
-    return 10.0**(C0 + C1*lt + C2*lt**2)
+    return 10.0**(C0+C1*lt+C2*lt**2)
 
 def model_stream(soil_sat_pct, rain_24h, qpf_24h, rain_7d,
                  da_sqmi, tc_hrs, cn_ii, baseflow, rating_a, rating_b, bankfull_q):
@@ -1207,20 +1307,18 @@ def model_stream(soil_sat_pct, rain_24h, qpf_24h, rain_7d,
     Q_runoff_in = (P-Ia)**2/(P-Ia+S) if P > Ia else 0.0
     Q_storm = (_tr55_unit_peak(tc_hrs, min(0.50,max(0.10,Ia/P))) * da_sqmi * Q_runoff_in
                if Q_runoff_in > 0 and P > 0 else 0.0)
-    Q_base   = baseflow * (1.0 + (soil_sat_pct / 100.0) * 3.0)
-    Q_recess = max(0.0, (rain_7d - rain_24h) * baseflow * RECESSION_K * 5.0)
+    Q_base   = baseflow * (1.0 + (soil_sat_pct/100.0) * 3.0)
+    Q_recess = max(0.0, (rain_7d-rain_24h)*baseflow*RECESSION_K*5.0)
     Q_total  = round(max(baseflow*0.5, min(Q_base+Q_storm+Q_recess, bankfull_q*3.0)), 1)
     depth_ft = round(max(0.20, min((Q_total/rating_a)**(1.0/rating_b), 9.0)), 2)
     return depth_ft, Q_total
 
 def flood_threat_score(soil_sat, rain_24h, qpf_6h, pop_24h):
-    rain_component = min(100.0, rain_24h * 30.0)
-    qpf_component  = min(100.0, qpf_6h  * 40.0)
     return round(min(100.0,
-        (soil_sat       * 0.40) +
-        (rain_component * 0.30) +
-        (qpf_component  * 0.20) +
-        (pop_24h        * 0.10)), 1)
+        (soil_sat              * 0.40) +
+        (min(100.0,rain_24h*30)* 0.30) +
+        (min(100.0,qpf_6h*40)  * 0.20) +
+        (pop_24h               * 0.10)), 1)
 
 def threat_meta(score):
     if score < 25: return "NORMAL",    "#00FF9C", "rgba(0,255,156,0.07)"
@@ -1340,7 +1438,7 @@ def _alert_style(event_name):
 
 conditions    = fetch_current_conditions()
 usgs_tuck     = fetch_usgs_tuck_gage()
-forecast      = _build_unified_forecast()          # also caches _nws_grid_props
+forecast      = _build_unified_forecast()
 station_rain  = fetch_realtime_stations()
 active_alerts = fetch_active_alerts()
 hwo_text      = fetch_hwo()
@@ -1348,11 +1446,18 @@ hwo_text      = fetch_hwo()
 sm_07, sm_728, sm_ts, sm_ok       = fetch_era5_soil_moisture()
 usdm_level, usdm_label, usdm_date = fetch_usdm_drought()
 
-# Precip — full fallback chain
 _nws_grid   = st.session_state.get("_nws_grid_props")
 backup_rain = fetch_precip_best(nws_grid_props=_nws_grid)
 
-# Resolve final rain values: Tier 1 deployed sensors win; else best-available chain
+# New extended sources
+nwps_tuck    = fetch_nwps_tuckasegee()
+mrms_qpe     = fetch_mrms_qpe()
+nasa_soil    = fetch_nasa_power_soil()
+ncstate_clim = fetch_ncstate_climate()
+fiman_data   = fetch_fiman_jackson()
+goes16_urls  = get_goes16_urls()
+
+# Resolve precipitation
 if station_rain.get("ok"):
     rain_24h = station_rain.get("rain_24h_in") or backup_rain["rain_24h_in"]
     rain_5d  = station_rain.get("rain_5d_in")  or backup_rain["rain_5d_in"]
@@ -1362,7 +1467,10 @@ else:
     rain_5d  = backup_rain["rain_5d_in"]
     rain_7d  = backup_rain["rain_7d_in"]
 
-# RAIN NOW: max across all available sources — avoids false zero from any single failure
+# Cross-check rain_24h against MRMS
+if mrms_qpe.get("ok") and mrms_qpe.get("rain_24h_in"):
+    rain_24h = max(rain_24h, mrms_qpe["rain_24h_in"])
+
 _candidates = [
     station_rain.get("rain_rate_in_hr"),
     station_rain.get("rain_1h_in"),
@@ -1370,17 +1478,14 @@ _candidates = [
     backup_rain.get("rain_1h_in"),
     conditions["precip"],
 ]
-rain_now = max((v for v in _candidates if v is not None), default=0.0)
-rain_now = round(rain_now, 3)
+rain_now = round(max((v for v in _candidates if v is not None), default=0.0), 3)
 
 soil_sat, soil_stored, soil_color = calc_soil_sat_ensemble(
     sm_07, sm_728, sm_ok, rain_5d, usdm_level)
 
-# Sub-basin soil saturation with orographic and drainage-speed modifiers
 _oro_factor  = 1.056
 _rain_5d_up  = round(min(rain_5d  * _oro_factor, 15.0), 3)
 _rain_24h_up = round(min(rain_24h * _oro_factor, 20.0), 3)
-
 _storm_pct    = min(1.0, rain_24h / 1.5)
 _sat_modifier = 0.88 + _storm_pct * 0.20
 
@@ -1388,20 +1493,19 @@ soil_sat_lo = soil_sat
 _soil_sat_up_raw, _, _ = calc_soil_sat_ensemble(
     sm_07, sm_728, sm_ok, _rain_5d_up, usdm_level)
 soil_sat_up = round(min(100.0, max(1.0,
-    0.50 * _soil_sat_up_raw * _sat_modifier +
-    0.50 * soil_sat * _sat_modifier)), 1)
+    0.50*_soil_sat_up_raw*_sat_modifier + 0.50*soil_sat*_sat_modifier)), 1)
 
 def _sc(s): return "#FF3333" if s>85 else "#FF8800" if s>70 else "#FFD700" if s>50 else "#00FF9C"
 def _ss(s): return round((s/100.0)*(SOIL_POROSITY*11.024), 2)
 
-soil_color_lo  = _sc(soil_sat_lo);  soil_stored_lo = soil_stored
-soil_color_up  = _sc(soil_sat_up);  soil_stored_up = _ss(soil_sat_up)
+soil_color_lo  = _sc(soil_sat_lo); soil_stored_lo = soil_stored
+soil_color_up  = _sc(soil_sat_up); soil_stored_up = _ss(soil_sat_up)
 
 qpf_6h  = _qpf_next_hours(6)
 qpf_24h = qpf_6h
 pop_24h = forecast[0]["pop"] if forecast else 0.0
 
-threat             = flood_threat_score(soil_sat_lo, rain_24h, qpf_6h, pop_24h)
+threat              = flood_threat_score(soil_sat_lo, rain_24h, qpf_6h, pop_24h)
 t_lbl, t_clr, t_bg = threat_meta(threat)
 
 lo_depth, lo_flow = model_stream(soil_sat_lo, rain_24h, qpf_24h, rain_7d,
@@ -1417,7 +1521,7 @@ for k, v in [("lo_depth",lo_depth),("lo_flow",lo_flow),
 def _smooth(old, new, decimals):
     if new >= old:
         return round(new, decimals)
-    return round(old * 0.85 + new * 0.15, decimals)
+    return round(old*0.85 + new*0.15, decimals)
 
 st.session_state.lo_depth = _smooth(st.session_state.lo_depth, lo_depth, 2)
 st.session_state.lo_flow  = _smooth(st.session_state.lo_flow,  lo_flow,  1)
@@ -1433,15 +1537,13 @@ lo_bkf_pct = round(min(100, st.session_state.lo_depth/LO_BANKFULL*100), 1)
 up_bkf_pct = round(min(100, st.session_state.up_depth/UP_BANKFULL*100), 1)
 
 _q_ref     = max(LO_BASEFLOW, st.session_state.lo_flow)
-travel_min = round(min(90.0, max(15.0,
-    FLOOD_TRAVEL_MIN * (LO_BASEFLOW / _q_ref) ** 0.40)), 1)
+travel_min = round(min(90.0, max(15.0, FLOOD_TRAVEL_MIN*(LO_BASEFLOW/_q_ref)**0.40)), 1)
 _tw_clr    = "#FF3333" if travel_min<25 else "#FF8800" if travel_min<35 else "#FFD700" if travel_min<50 else "#00FF9C"
 _r7_clr    = "#FF3333" if rain_7d>5.0 else "#FF8800" if rain_7d>3.0 else "#FFD700" if rain_7d>1.5 else "#00FF9C"
 
 _src_label, _src_color = _precip_badge(station_rain, backup_rain)
 
-# Current-conditions overlay from AWN if available (temp/wind/pressure)
-_awn_data = backup_rain if "AWN" in backup_rain.get("source", "") else {}
+_awn_data   = backup_rain if "AWN" in backup_rain.get("source","") else {}
 _disp_temp  = _awn_data.get("tempf",        conditions["temp"])
 _disp_wind  = _awn_data.get("windspeedmph", conditions["wind"])
 _disp_gust  = _awn_data.get("windgustmph",  conditions["wind_gust"])
@@ -1471,8 +1573,8 @@ st.markdown(f"""
   </div>
 </div>""", unsafe_allow_html=True)
 
-# ── PANEL 0: AWN STATION STATUS (when active) ─────────────────────────────────
-if "AWN" in backup_rain.get("source", ""):
+# ── PANEL 0: AWN STATION STATUS ───────────────────────────────────────────────
+if "AWN" in backup_rain.get("source",""):
     _awn_rate    = backup_rain.get("rain_rate_in_hr", 0.0) or 0.0
     _awn_1h      = backup_rain.get("rain_1h_in",      0.0) or 0.0
     _awn_24h_disp= backup_rain.get("rain_24h_in",     0.0) or 0.0
@@ -1503,7 +1605,7 @@ if "AWN" in backup_rain.get("source", ""):
   </div>
   <div style="font-family:'Share Tech Mono',monospace;font-size:0.60em;color:#2A4A5A;
               margin-top:8px;text-align:right;">
-    SOURCES ACTIVE: {" &middot; ".join(backup_rain.get("sources", []))}
+    SOURCES ACTIVE: {" &middot; ".join(backup_rain.get("sources",[]))}
   </div>
 </div>""", unsafe_allow_html=True)
 
@@ -1528,9 +1630,9 @@ st.markdown(f"""
   </div>
 </div>""", unsafe_allow_html=True)
 
-# ── PANEL 1B: WARNINGS & WATCHES (rank >= 3) ──────────────────────────────────
+# ── PANEL 1B: WARNINGS & WATCHES ──────────────────────────────────────────────
 _severe_alerts   = [a for a in active_alerts if ALERT_RANK.get(a["event"].lower(), 0) >= 3]
-_advisory_alerts = [a for a in active_alerts if ALERT_RANK.get(a["event"].lower(), 0) in (1, 2)]
+_advisory_alerts = [a for a in active_alerts if ALERT_RANK.get(a["event"].lower(), 0) in (1,2)]
 
 if _severe_alerts:
     st.markdown('<div class="panel"><div class="panel-title">ACTIVE WARNINGS &amp; WATCHES</div>',
@@ -1550,7 +1652,7 @@ if _severe_alerts:
 </div>""", unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ── PANEL 1C: NWS SITUATIONAL AWARENESS — advisories + HWO ───────────────────
+# ── PANEL 1C: HWO + ADVISORIES ────────────────────────────────────────────────
 if hwo_text or _advisory_alerts:
     _ph = ""
     for a in _advisory_alerts:
@@ -1612,22 +1714,22 @@ _up_max = UP_BANKFULL * 2.5
 st.markdown(f'<div class="upper-panel"><div class="upper-title">'
             f'UPPER CULLOWHEE CREEK ({UP_AREA_ACRES:,} AC | {UP_DA_SQMI:.2f} mi²)</div>',
             unsafe_allow_html=True)
-u1, u2, u3 = st.columns([2, 2, 3])
+u1, u2, u3 = st.columns([2,2,3])
 with u1:
     st.components.v1.html(make_stream_gauge(
         "g_up_depth", st.session_state.up_depth, 0.0, _up_max, " ft",
-        [{"range":[0.0,             UP_BANKFULL*0.60],"color":"rgba(0,255,156,0.15)"},
+        [{"range":[0.0,UP_BANKFULL*0.60],"color":"rgba(0,255,156,0.15)"},
          {"range":[UP_BANKFULL*0.60,UP_BANKFULL*0.95],"color":"rgba(255,215,0,0.20)"},
-         {"range":[UP_BANKFULL*0.95,_up_max],         "color":"rgba(255,51,51,0.25)"}],
+         {"range":[UP_BANKFULL*0.95,_up_max],"color":"rgba(255,51,51,0.25)"}],
         up_depth_clr, up_depth_lbl, up_depth_clr,
         f"Stage: {st.session_state.up_depth:.2f} ft"), height=240)
 with u2:
     _up_q_max = UP_BANKFULL_Q * 3.0
     st.components.v1.html(make_stream_gauge(
         "g_up_flow", st.session_state.up_flow, 0.0, _up_q_max, " cfs",
-        [{"range":[0.0,              UP_BANKFULL_Q*0.45],"color":"rgba(0,255,156,0.15)"},
+        [{"range":[0.0,UP_BANKFULL_Q*0.45],"color":"rgba(0,255,156,0.15)"},
          {"range":[UP_BANKFULL_Q*0.45,UP_BANKFULL_Q*0.95],"color":"rgba(255,215,0,0.20)"},
-         {"range":[UP_BANKFULL_Q*0.95,_up_q_max],         "color":"rgba(255,51,51,0.25)"}],
+         {"range":[UP_BANKFULL_Q*0.95,_up_q_max],"color":"rgba(255,51,51,0.25)"}],
         up_flow_clr, up_flow_lbl, up_flow_clr,
         f"Q: {st.session_state.up_flow:.1f} cfs"), height=240)
 with u3:
@@ -1648,22 +1750,22 @@ _lo_max = LO_BANKFULL * 2.5
 st.markdown(f'<div class="lower-panel"><div class="lower-title">'
             f'LOWER CULLOWHEE CREEK ({LO_AREA_ACRES:,} AC | {LO_DA_SQMI:.2f} mi²)</div>',
             unsafe_allow_html=True)
-l1, l2, l3 = st.columns([2, 2, 3])
+l1, l2, l3 = st.columns([2,2,3])
 with l1:
     st.components.v1.html(make_stream_gauge(
         "g_lo_depth", st.session_state.lo_depth, 0.0, _lo_max, " ft",
-        [{"range":[0.0,             LO_BANKFULL*0.60],"color":"rgba(0,255,156,0.15)"},
+        [{"range":[0.0,LO_BANKFULL*0.60],"color":"rgba(0,255,156,0.15)"},
          {"range":[LO_BANKFULL*0.60,LO_BANKFULL*0.95],"color":"rgba(255,215,0,0.20)"},
-         {"range":[LO_BANKFULL*0.95,_lo_max],         "color":"rgba(255,51,51,0.25)"}],
+         {"range":[LO_BANKFULL*0.95,_lo_max],"color":"rgba(255,51,51,0.25)"}],
         lo_depth_clr, lo_depth_lbl, lo_depth_clr,
         f"Stage: {st.session_state.lo_depth:.2f} ft"), height=240)
 with l2:
     _lo_q_max = LO_BANKFULL_Q * 3.0
     st.components.v1.html(make_stream_gauge(
         "g_lo_flow", st.session_state.lo_flow, 0.0, _lo_q_max, " cfs",
-        [{"range":[0.0,              LO_BANKFULL_Q*0.45],"color":"rgba(0,255,156,0.15)"},
+        [{"range":[0.0,LO_BANKFULL_Q*0.45],"color":"rgba(0,255,156,0.15)"},
          {"range":[LO_BANKFULL_Q*0.45,LO_BANKFULL_Q*0.95],"color":"rgba(255,215,0,0.20)"},
-         {"range":[LO_BANKFULL_Q*0.95,_lo_q_max],         "color":"rgba(255,51,51,0.25)"}],
+         {"range":[LO_BANKFULL_Q*0.95,_lo_q_max],"color":"rgba(255,51,51,0.25)"}],
         lo_flow_clr, lo_flow_lbl, lo_flow_clr,
         f"Q: {st.session_state.lo_flow:.1f} cfs"), height=240)
 with l3:
@@ -1716,10 +1818,9 @@ st.markdown(f"""
                 margin-top:6px;letter-spacing:2px;">{lo_depth_lbl}</div>
   </div>
 </div>""", unsafe_allow_html=True)
-tw1, tw2, tw3 = st.columns([1, 2, 1])
+tw1, tw2, tw3 = st.columns([1,2,1])
 with tw2:
-    st.plotly_chart(make_dial(travel_min, "WAVE TRAVEL", 15, 90, " min", _tw_clr),
-                    use_container_width=True)
+    st.plotly_chart(make_dial(travel_min,"WAVE TRAVEL",15,90," min",_tw_clr), use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ── PANEL 5B: USGS TUCKASEGEE REFERENCE GAGE ──────────────────────────────────
@@ -1730,9 +1831,8 @@ if usgs_tuck.get("ok"):
     _tgh  = usgs_tuck.get("gage_height_ft", 0)
     _tscl = usgs_tuck.get("cullowhee_scaled_cfs", 0)
     _tage = int(usgs_tuck.get("discharge_age_min", 0))
-    _t_pct_flood = round(min(100, _tgh / 16.0 * 100), 1)
-    _t_clr = ("#FF3333" if _tgh >= 14 else "#FF8800" if _tgh >= 10 else
-              "#FFD700" if _tgh >= 7  else "#00FF9C")
+    _t_pct_flood = round(min(100, _tgh/16.0*100), 1)
+    _t_clr = ("#FF3333" if _tgh>=14 else "#FF8800" if _tgh>=10 else "#FFD700" if _tgh>=7 else "#00FF9C")
     st.markdown(f"""
 <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:14px;">
   <div style="background:rgba(0,100,200,0.08);border:1px solid rgba(0,119,255,0.25);
@@ -1767,13 +1867,308 @@ if usgs_tuck.get("ok"):
 </div>
 <div style="font-family:'Share Tech Mono',monospace;font-size:0.62em;color:#3A5A6A;
             margin-top:10px;text-align:right;">
-  USGS 03508050 &nbsp;&middot;&nbsp; DA=147 mi² (Cullowhee Creek = 6.6% of watershed)
-  &nbsp;&middot;&nbsp; No gage on Cullowhee Creek — scaled for reference only
-  &nbsp;&middot;&nbsp; Tuckasegee regulated by Duke Energy / Lake Glenville
+  USGS 03508050 &nbsp;&middot;&nbsp; DA=147 mi² &nbsp;&middot;&nbsp;
+  No gage on Cullowhee Creek — scaled for reference only
 </div>""", unsafe_allow_html=True)
 else:
     st.markdown('<div style="color:#FF8800;font-family:\'Share Tech Mono\',monospace;'
                 'font-size:0.8em;">USGS 03508050 UNAVAILABLE</div>', unsafe_allow_html=True)
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ── PANEL 5C: NWPS — TUCKASEGEE RIVER FORECAST ────────────────────────────────
+st.markdown('<div class="panel"><div class="panel-title">NWPS — TUCKASEGEE RIVER AT BRYSON CITY &nbsp;|&nbsp; SERFC RIVER FORECAST</div>',
+            unsafe_allow_html=True)
+if nwps_tuck.get("ok"):
+    _obs   = nwps_tuck.get("observed_stage_ft", 0.0) or 0.0
+    _fcst  = nwps_tuck.get("forecast_peak_ft",  0.0) or 0.0
+    _minor = nwps_tuck.get("stage_minor_ft",    99.0) or 99.0
+    _act   = nwps_tuck.get("stage_action_ft",   99.0) or 99.0
+    _sclr  = nwps_tuck.get("status_clr", "#00FF9C")
+    _slbl  = nwps_tuck.get("status", "---")
+    _otime = nwps_tuck.get("observed_time", "---")
+    _pktime= nwps_tuck.get("forecast_peak_time","---")
+    _age   = int(nwps_tuck.get("observed_age_min", 0) or 0)
+    st.markdown(f"""
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:12px;">
+  <div style="background:rgba(0,100,200,0.08);border:1px solid rgba(0,119,255,0.25);
+              border-radius:8px;padding:14px;text-align:center;">
+    <div style="font-family:'Share Tech Mono',monospace;font-size:0.68em;color:#0077FF;
+                letter-spacing:2px;margin-bottom:6px;">OBSERVED STAGE</div>
+    <div style="font-size:2.0em;font-weight:700;color:{_sclr};">{_obs:.2f} ft</div>
+    <div style="font-size:0.7em;color:#5AACD0;">{_otime} ({_age} min ago)</div>
+  </div>
+  <div style="background:rgba(0,100,200,0.08);border:1px solid rgba(0,119,255,0.25);
+              border-radius:8px;padding:14px;text-align:center;">
+    <div style="font-family:'Share Tech Mono',monospace;font-size:0.68em;color:#0077FF;
+                letter-spacing:2px;margin-bottom:6px;">FORECAST PEAK</div>
+    <div style="font-size:2.0em;font-weight:700;color:#FFD700;">{_fcst:.2f} ft</div>
+    <div style="font-size:0.7em;color:#5AACD0;">{_pktime}</div>
+  </div>
+  <div style="background:rgba(255,215,0,0.07);border:1px solid rgba(255,215,0,0.25);
+              border-radius:8px;padding:14px;text-align:center;">
+    <div style="font-family:'Share Tech Mono',monospace;font-size:0.68em;color:#FFD700;
+                letter-spacing:2px;margin-bottom:6px;">ACTION STAGE</div>
+    <div style="font-size:2.0em;font-weight:700;color:#FFD700;">{_act:.1f} ft</div>
+    <div style="font-size:0.7em;color:#5AACD0;">Tuckasegee at Bryson City</div>
+  </div>
+  <div style="background:rgba(255,136,0,0.07);border:1px solid rgba(255,136,0,0.25);
+              border-radius:8px;padding:14px;text-align:center;">
+    <div style="font-family:'Share Tech Mono',monospace;font-size:0.68em;color:#FF8800;
+                letter-spacing:2px;margin-bottom:6px;">MINOR FLOOD</div>
+    <div style="font-size:2.0em;font-weight:700;color:#FF8800;">{_minor:.1f} ft</div>
+    <div style="font-size:0.7em;color:#5AACD0;">NWS threshold</div>
+  </div>
+  <div style="background:rgba(0,100,200,0.08);border:1px solid rgba(0,119,255,0.25);
+              border-radius:8px;padding:14px;text-align:center;">
+    <div style="font-family:'Share Tech Mono',monospace;font-size:0.68em;color:#0077FF;
+                letter-spacing:2px;margin-bottom:6px;">STATUS</div>
+    <div style="font-size:1.4em;font-weight:700;color:{_sclr};letter-spacing:2px;">{_slbl}</div>
+    <div style="font-size:0.7em;color:#5AACD0;">SERFC / NWPS</div>
+  </div>
+</div>
+<div style="font-family:'Share Tech Mono',monospace;font-size:0.62em;color:#3A5A6A;
+            margin-top:10px;text-align:right;">
+  NWPS TKSN7 &nbsp;&middot;&nbsp; Tuckasegee at Bryson City NC
+  &nbsp;&middot;&nbsp; Southeast RFC &nbsp;&middot;&nbsp; ~18 mi downstream of Cullowhee
+</div>""", unsafe_allow_html=True)
+else:
+    st.markdown(f'<div style="color:#FF8800;font-family:\'Share Tech Mono\',monospace;'
+                f'font-size:0.8em;">NWPS TKSN7 UNAVAILABLE — {nwps_tuck.get("reason","")}</div>',
+                unsafe_allow_html=True)
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ── PANEL 5D: MRMS QPE ────────────────────────────────────────────────────────
+st.markdown('<div class="panel"><div class="panel-title">NOAA MRMS QPE &nbsp;|&nbsp; MULTI-RADAR MULTI-SENSOR 1KM PRECIPITATION</div>',
+            unsafe_allow_html=True)
+if mrms_qpe.get("ok"):
+    _r24  = mrms_qpe.get("rain_24h_in", 0.0) or 0.0
+    _r48  = mrms_qpe.get("rain_48h_in", 0.0) or 0.0
+    _r7d  = mrms_qpe.get("rain_7d_in",  0.0) or 0.0
+    _mdate= mrms_qpe.get("as_of","---")
+    _c24  = "#FF3333" if _r24>2.0 else "#FF8800" if _r24>1.0 else "#FFD700" if _r24>0.5 else "#00FF9C"
+    _c7d  = "#FF3333" if _r7d>5.0 else "#FF8800" if _r7d>3.0 else "#FFD700" if _r7d>1.5 else "#00FF9C"
+    st.markdown(f"""
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;">
+  <div style="background:rgba(0,100,200,0.08);border:1px solid rgba(0,119,255,0.25);
+              border-radius:8px;padding:14px;text-align:center;">
+    <div style="font-family:'Share Tech Mono',monospace;font-size:0.68em;color:#0077FF;
+                letter-spacing:2px;margin-bottom:6px;">MRMS 24-HR QPE</div>
+    <div style="font-size:2.2em;font-weight:700;color:{_c24};">{_r24:.3f}&quot;</div>
+    <div style="font-size:0.7em;color:#5AACD0;">Radar + gauge merged</div>
+  </div>
+  <div style="background:rgba(0,100,200,0.08);border:1px solid rgba(0,119,255,0.25);
+              border-radius:8px;padding:14px;text-align:center;">
+    <div style="font-family:'Share Tech Mono',monospace;font-size:0.68em;color:#0077FF;
+                letter-spacing:2px;margin-bottom:6px;">MRMS 48-HR QPE</div>
+    <div style="font-size:2.2em;font-weight:700;color:#00CFFF;">{_r48:.3f}&quot;</div>
+    <div style="font-size:0.7em;color:#5AACD0;">Dual-pol QPE</div>
+  </div>
+  <div style="background:rgba(0,100,200,0.08);border:1px solid rgba(0,119,255,0.25);
+              border-radius:8px;padding:14px;text-align:center;">
+    <div style="font-family:'Share Tech Mono',monospace;font-size:0.68em;color:#0077FF;
+                letter-spacing:2px;margin-bottom:6px;">MRMS 7-DAY QPE</div>
+    <div style="font-size:2.2em;font-weight:700;color:{_c7d};">{_r7d:.3f}&quot;</div>
+    <div style="font-size:0.7em;color:#5AACD0;">v12.3 — 1km CONUS</div>
+  </div>
+  <div style="background:rgba(0,100,200,0.08);border:1px solid rgba(0,119,255,0.25);
+              border-radius:8px;padding:14px;text-align:center;">
+    <div style="font-family:'Share Tech Mono',monospace;font-size:0.68em;color:#0077FF;
+                letter-spacing:2px;margin-bottom:6px;">DATA DATE</div>
+    <div style="font-size:1.4em;font-weight:700;color:#00CFFF;">{_mdate}</div>
+    <div style="font-size:0.7em;color:#5AACD0;">Iowa Env. Mesonet</div>
+  </div>
+</div>
+<div style="font-family:'Share Tech Mono',monospace;font-size:0.62em;color:#3A5A6A;
+            margin-top:10px;text-align:right;">
+  NOAA MRMS v12.3 &nbsp;&middot;&nbsp; Multi-Sensor QPE Pass 2
+  &nbsp;&middot;&nbsp; Orographic enhancement captured &nbsp;&middot;&nbsp; via IEM IEMRE
+</div>""", unsafe_allow_html=True)
+else:
+    st.markdown(f'<div style="color:#FF8800;font-family:\'Share Tech Mono\',monospace;'
+                f'font-size:0.8em;">MRMS QPE UNAVAILABLE — {mrms_qpe.get("reason","")}</div>',
+                unsafe_allow_html=True)
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ── PANEL 5E: NASA POWER SOIL MOISTURE ────────────────────────────────────────
+st.markdown('<div class="panel"><div class="panel-title">NASA POWER &nbsp;|&nbsp; SMAP-DERIVED SOIL MOISTURE</div>',
+            unsafe_allow_html=True)
+if nasa_soil.get("ok"):
+    _top  = nasa_soil.get("surface_vwc",  0.0) or 0.0
+    _root = nasa_soil.get("rootzone_vwc", 0.0) or 0.0
+    _prof = nasa_soil.get("profile_vwc",  0.0) or 0.0
+    _sat  = nasa_soil.get("sat_pct",      0.0) or 0.0
+    _ndate= nasa_soil.get("as_of","---")
+    _nclr = "#FF3333" if _sat>85 else "#FF8800" if _sat>70 else "#FFD700" if _sat>50 else "#00FF9C"
+    st.markdown(f"""
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;">
+  <div style="background:rgba(0,100,200,0.08);border:1px solid rgba(0,119,255,0.25);
+              border-radius:8px;padding:14px;text-align:center;">
+    <div style="font-family:'Share Tech Mono',monospace;font-size:0.68em;color:#0077FF;
+                letter-spacing:2px;margin-bottom:6px;">SURFACE (0-10cm)</div>
+    <div style="font-size:2.0em;font-weight:700;color:{_nclr};">{_top:.3f}</div>
+    <div style="font-size:0.7em;color:#5AACD0;">m³/m³ VWC</div>
+  </div>
+  <div style="background:rgba(0,100,200,0.08);border:1px solid rgba(0,119,255,0.25);
+              border-radius:8px;padding:14px;text-align:center;">
+    <div style="font-family:'Share Tech Mono',monospace;font-size:0.68em;color:#0077FF;
+                letter-spacing:2px;margin-bottom:6px;">ROOT ZONE</div>
+    <div style="font-size:2.0em;font-weight:700;color:#00CFFF;">{_root:.3f}</div>
+    <div style="font-size:0.7em;color:#5AACD0;">m³/m³ VWC</div>
+  </div>
+  <div style="background:rgba(0,100,200,0.08);border:1px solid rgba(0,119,255,0.25);
+              border-radius:8px;padding:14px;text-align:center;">
+    <div style="font-family:'Share Tech Mono',monospace;font-size:0.68em;color:#0077FF;
+                letter-spacing:2px;margin-bottom:6px;">PROFILE</div>
+    <div style="font-size:2.0em;font-weight:700;color:#00CFFF;">{_prof:.3f}</div>
+    <div style="font-size:0.7em;color:#5AACD0;">m³/m³ VWC</div>
+  </div>
+  <div style="background:rgba(0,100,200,0.08);border:1px solid rgba(0,119,255,0.25);
+              border-radius:8px;padding:14px;text-align:center;">
+    <div style="font-family:'Share Tech Mono',monospace;font-size:0.68em;color:#0077FF;
+                letter-spacing:2px;margin-bottom:6px;">SAT EQUIVALENT</div>
+    <div style="font-size:2.0em;font-weight:700;color:{_nclr};">{_sat:.1f}%</div>
+    <div style="font-size:0.7em;color:#5AACD0;">as of {_ndate}</div>
+  </div>
+</div>
+<div style="font-family:'Share Tech Mono',monospace;font-size:0.62em;color:#3A5A6A;
+            margin-top:10px;text-align:right;">
+  NASA POWER GLDAS/SMAP &nbsp;&middot;&nbsp; ~1-2 day latency &nbsp;&middot;&nbsp;
+  GWETTOP / GWETROOT / GWETPROF
+</div>""", unsafe_allow_html=True)
+else:
+    st.markdown(f'<div style="color:#FF8800;font-family:\'Share Tech Mono\',monospace;'
+                f'font-size:0.8em;">NASA POWER UNAVAILABLE — {nasa_soil.get("reason","")}</div>',
+                unsafe_allow_html=True)
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ── PANEL 5F: NC STATE CLIMATE OFFICE ─────────────────────────────────────────
+st.markdown('<div class="panel"><div class="panel-title">NC STATE CLIMATE OFFICE &nbsp;|&nbsp; PRISM DAILY CLIMATE — CULLOWHEE WATERSHED</div>',
+            unsafe_allow_html=True)
+if ncstate_clim.get("ok"):
+    _cr7  = ncstate_clim.get("rain_7d_in",   0.0) or 0.0
+    _cr14 = ncstate_clim.get("rain_14d_in",  0.0) or 0.0
+    _cr30 = ncstate_clim.get("rain_30d_in",  0.0) or 0.0
+    _cnorm= ncstate_clim.get("monthly_normal",4.0)
+    _cdep = ncstate_clim.get("departure_30d", 0.0) or 0.0
+    _cdail= ncstate_clim.get("recent_daily", [])
+    _cdate= ncstate_clim.get("latest_date",  "---")
+    _cdep_clr = "#FF3333" if _cdep<-1.5 else "#FF8800" if _cdep<-0.5 else \
+                "#00FF9C" if _cdep>1.5  else "#FFD700"
+    _cdep_str = f"+{_cdep:.2f}" if _cdep >= 0 else f"{_cdep:.2f}"
+    _cr7_clr  = "#FF3333" if _cr7>5.0 else "#FF8800" if _cr7>3.0 else "#FFD700" if _cr7>1.5 else "#00FF9C"
+    _bars = ""
+    if _cdail:
+        max_p = max((d["pcpn_in"] for d in _cdail), default=1.0) or 1.0
+        for d in _cdail:
+            h = max(2, int((d["pcpn_in"]/max_p)*40))
+            c = "#FF3333" if d["pcpn_in"]>1.0 else "#FF8800" if d["pcpn_in"]>0.5 else \
+                "#00CFFF" if d["pcpn_in"]>0.0 else "#1A2A3A"
+            lbl = d["date"][-5:]
+            _bars += (f'<div style="display:flex;flex-direction:column;align-items:center;'
+                      f'justify-content:flex-end;width:28px;gap:2px;">'
+                      f'<div style="width:20px;height:{h}px;background:{c};border-radius:2px 2px 0 0;"></div>'
+                      f'<div style="font-size:0.55em;color:#4A6A7A;transform:rotate(-45deg);'
+                      f'white-space:nowrap;">{lbl}</div></div>')
+    st.markdown(f"""
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;margin-bottom:12px;">
+  <div style="background:rgba(0,100,200,0.08);border:1px solid rgba(0,119,255,0.25);
+              border-radius:8px;padding:14px;text-align:center;">
+    <div style="font-family:'Share Tech Mono',monospace;font-size:0.68em;color:#0077FF;
+                letter-spacing:2px;margin-bottom:6px;">7-DAY PRISM</div>
+    <div style="font-size:2.0em;font-weight:700;color:{_cr7_clr};">{_cr7:.3f}&quot;</div>
+    <div style="font-size:0.7em;color:#5AACD0;">PRISM gridded obs</div>
+  </div>
+  <div style="background:rgba(0,100,200,0.08);border:1px solid rgba(0,119,255,0.25);
+              border-radius:8px;padding:14px;text-align:center;">
+    <div style="font-family:'Share Tech Mono',monospace;font-size:0.68em;color:#0077FF;
+                letter-spacing:2px;margin-bottom:6px;">14-DAY PRISM</div>
+    <div style="font-size:2.0em;font-weight:700;color:#00CFFF;">{_cr14:.3f}&quot;</div>
+    <div style="font-size:0.7em;color:#5AACD0;">PRISM gridded obs</div>
+  </div>
+  <div style="background:rgba(0,100,200,0.08);border:1px solid rgba(0,119,255,0.25);
+              border-radius:8px;padding:14px;text-align:center;">
+    <div style="font-family:'Share Tech Mono',monospace;font-size:0.68em;color:#0077FF;
+                letter-spacing:2px;margin-bottom:6px;">30-DAY TOTAL</div>
+    <div style="font-size:2.0em;font-weight:700;color:#00CFFF;">{_cr30:.3f}&quot;</div>
+    <div style="font-size:0.7em;color:#5AACD0;">normal: {_cnorm:.1f}&quot;</div>
+  </div>
+  <div style="background:rgba(0,100,200,0.08);border:1px solid rgba(0,119,255,0.25);
+              border-radius:8px;padding:14px;text-align:center;">
+    <div style="font-family:'Share Tech Mono',monospace;font-size:0.68em;color:#0077FF;
+                letter-spacing:2px;margin-bottom:6px;">30-DAY DEPARTURE</div>
+    <div style="font-size:2.0em;font-weight:700;color:{_cdep_clr};">{_cdep_str}&quot;</div>
+    <div style="font-size:0.7em;color:#5AACD0;">vs monthly normal</div>
+  </div>
+</div>
+<div style="font-family:'Share Tech Mono',monospace;font-size:0.68em;color:#0077FF;
+            letter-spacing:2px;margin-bottom:8px;">RECENT DAILY PRECIPITATION (PRISM)</div>
+<div style="display:flex;align-items:flex-end;gap:2px;height:60px;padding-bottom:16px;">
+  {_bars}
+</div>
+<div style="font-family:'Share Tech Mono',monospace;font-size:0.62em;color:#3A5A6A;
+            margin-top:4px;text-align:right;">
+  NC State Climate Office &nbsp;&middot;&nbsp; ACIS PRISM Grid 21 &nbsp;&middot;&nbsp;
+  data through {_cdate}
+</div>""", unsafe_allow_html=True)
+else:
+    st.markdown(f'<div style="color:#FF8800;font-family:\'Share Tech Mono\',monospace;'
+                f'font-size:0.8em;">NC STATE CLIMATE UNAVAILABLE — {ncstate_clim.get("reason","")}</div>',
+                unsafe_allow_html=True)
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ── PANEL 5G: NC FIMAN ────────────────────────────────────────────────────────
+st.markdown('<div class="panel"><div class="panel-title">NC FIMAN &nbsp;|&nbsp; JACKSON COUNTY FLOOD INUNDATION MAPPING &amp; ALERT NETWORK</div>',
+            unsafe_allow_html=True)
+if fiman_data.get("ok") and fiman_data.get("gauges"):
+    gauges = fiman_data["gauges"]
+    _fcols = st.columns(min(len(gauges), 4))
+    for i, g in enumerate(gauges[:4]):
+        with _fcols[i % 4]:
+            _fname  = g.get("name","---")
+            _fstage = g.get("stage","---")
+            _fprecip= g.get("precip","---")
+            _fstatus= g.get("status","---").upper()
+            _fsclr  = ("#FF3333" if "flood" in _fstatus.lower() else
+                       "#FF8800" if "action" in _fstatus.lower() else "#00FF9C")
+            st.markdown(f"""
+<div style="background:rgba(0,100,200,0.08);border:1px solid rgba(0,119,255,0.25);
+            border-radius:8px;padding:14px;text-align:center;">
+  <div style="font-family:'Share Tech Mono',monospace;font-size:0.65em;color:#0077FF;
+              letter-spacing:2px;margin-bottom:6px;">{_fname}</div>
+  <div style="font-size:1.8em;font-weight:700;color:{_fsclr};">{_fstage} ft</div>
+  <div style="font-size:0.8em;color:#5AACD0;">Precip: {_fprecip}&quot;</div>
+  <div style="font-family:'Share Tech Mono',monospace;font-size:0.68em;color:{_fsclr};
+              margin-top:4px;letter-spacing:2px;">{_fstatus}</div>
+</div>""", unsafe_allow_html=True)
+else:
+    st.markdown(f"""
+<div style="background:rgba(0,100,200,0.06);border:1px solid rgba(0,119,255,0.20);
+            border-radius:8px;padding:16px 20px;">
+  <div style="font-family:'Share Tech Mono',monospace;font-size:0.72em;color:#5AACD0;
+              letter-spacing:2px;margin-bottom:10px;">
+    NC FIMAN provides real-time stage, rainfall, and flood inundation mapping
+    for 550+ gauges across NC including Jackson County.
+    Post-Hurricane Helene, Western NC coverage significantly expanded.
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:10px;">
+    <div style="background:rgba(0,80,160,0.15);border-radius:6px;padding:10px;text-align:center;">
+      <div style="font-family:'Share Tech Mono',monospace;font-size:0.65em;color:#0077FF;margin-bottom:4px;">LIVE MAP</div>
+      <div style="font-size:0.8em;color:#7AACCC;">fiman.nc.gov/fiman</div>
+    </div>
+    <div style="background:rgba(0,80,160,0.15);border-radius:6px;padding:10px;text-align:center;">
+      <div style="font-family:'Share Tech Mono',monospace;font-size:0.65em;color:#0077FF;margin-bottom:4px;">COVERAGE</div>
+      <div style="font-size:0.8em;color:#7AACCC;">Jackson County NC</div>
+    </div>
+    <div style="background:rgba(0,80,160,0.15);border-radius:6px;padding:10px;text-align:center;">
+      <div style="font-family:'Share Tech Mono',monospace;font-size:0.65em;color:#0077FF;margin-bottom:4px;">OPERATOR</div>
+      <div style="font-size:0.8em;color:#7AACCC;">NC Emergency Mgmt</div>
+    </div>
+  </div>
+  <div style="font-family:'Share Tech Mono',monospace;font-size:0.62em;color:#3A5A6A;margin-top:10px;">
+    API auth required for programmatic access &nbsp;&middot;&nbsp;
+    Contact NCEM for research data access
+  </div>
+</div>""", unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ── PANEL 6: 7-DAY FLOOD OUTLOOK ──────────────────────────────────────────────
@@ -1784,12 +2179,12 @@ if not forecast:
 else:
     pcols = st.columns(7)
     for i, d in enumerate(forecast[:7]):
-        _obs_weight = max(0.0, 1.0 - i * 0.25)
+        _obs_weight = max(0.0, 1.0 - i*0.25)
         risk  = min(100.0, round(
             (soil_sat_lo * 0.35) +
-            (min(100.0, rain_24h * 25) * _obs_weight * 0.20) +
-            (d["pop"]    * (0.35 - _obs_weight * 0.10)) +
-            (d["qpf_in"] * 18 * (1.0 - _obs_weight * 0.15)), 1))
+            (min(100.0, rain_24h*25) * _obs_weight * 0.20) +
+            (d["pop"]    * (0.35 - _obs_weight*0.10)) +
+            (d["qpf_in"] * 18 * (1.0 - _obs_weight*0.15)), 1))
         color = "#00FF9C" if risk<30 else "#FFFF00" if risk<50 else "#FFD700" if risk<65 else "#FF8800" if risk<80 else "#FF3333"
         with pcols[i]:
             st.markdown(
@@ -1806,9 +2201,10 @@ else:
                 f'</div>', unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ── PANEL 7: RADAR ────────────────────────────────────────────────────────────
-st.markdown('<div class="panel"><div class="panel-title">RADAR LOOP</div>', unsafe_allow_html=True)
-_cb = int(time.time() / 120)
+# ── PANEL 7: KGSP RADAR LOOP ──────────────────────────────────────────────────
+st.markdown('<div class="panel"><div class="panel-title">RADAR LOOP &nbsp;|&nbsp; KGSP GREENVILLE-SPARTANBURG</div>',
+            unsafe_allow_html=True)
+_cb = int(time.time()/120)
 st.components.v1.html(f"""
 <div style="background:#04090F;border-radius:10px;border:1px solid #1a2a3a;overflow:hidden;
             font-family:'Courier New',monospace;">
@@ -1841,4 +2237,62 @@ st.components.v1.html(f"""
     </div>
   </div>
 </div>""", height=610)
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ── PANEL 8: NOAA GOES-16 SATELLITE ───────────────────────────────────────────
+st.markdown('<div class="panel"><div class="panel-title">NOAA GOES-16 SATELLITE &nbsp;|&nbsp; SOUTHEAST SECTOR &nbsp;|&nbsp; GEOCOLOR COMPOSITE</div>',
+            unsafe_allow_html=True)
+_gcb = int(time.time()/300)
+st.components.v1.html(f"""
+<div style="background:#04090F;border-radius:10px;border:1px solid #1a2a3a;overflow:hidden;">
+  <div style="display:flex;align-items:center;justify-content:space-between;
+              padding:8px 16px;background:#0a1520;border-bottom:1px solid #1a3a5a;">
+    <div style="display:flex;align-items:center;gap:10px;">
+      <div style="width:8px;height:8px;border-radius:50%;background:#FFD700;
+                  box-shadow:0 0 6px #FFD700;"></div>
+      <span style="color:#FFD700;font-family:'Courier New',monospace;font-size:11px;
+                   font-weight:700;letter-spacing:2px;">GOES-16 SATELLITE</span>
+    </div>
+    <div style="color:#556677;font-family:'Courier New',monospace;font-size:10px;
+                letter-spacing:1px;">AUTO-UPDATE 5 MIN</div>
+  </div>
+  <div style="position:relative;background:#000;text-align:center;">
+    <img id="goes-img-main"
+         src="{goes16_urls['geocolor']}"
+         style="width:100%;max-height:520px;object-fit:contain;display:block;"
+         alt="GOES-16 GeoColor Southeast"/>
+    <div style="position:absolute;bottom:0;left:0;right:0;
+                background:linear-gradient(transparent,rgba(0,0,0,0.85));
+                padding:20px 16px 8px;display:flex;justify-content:space-between;align-items:flex-end;">
+      <div style="color:#667788;font-family:'Courier New',monospace;font-size:10px;letter-spacing:1px;">
+        GOES-EAST &bull; ABI &bull; SE SECTOR &bull; WNC / SC / GA / VA
+      </div>
+      <div style="display:flex;gap:8px;">
+        <span onclick="document.getElementById('goes-img-main').src='{goes16_urls['geocolor']}'"
+              style="color:#FFD700;font-family:'Courier New',monospace;font-size:10px;
+                     cursor:pointer;padding:2px 6px;border:1px solid #443300;border-radius:3px;">GEOCOLOR</span>
+        <span onclick="document.getElementById('goes-img-main').src='{goes16_urls['ir_clean']}'"
+              style="color:#5AC8FA;font-family:'Courier New',monospace;font-size:10px;
+                     cursor:pointer;padding:2px 6px;border:1px solid #003344;border-radius:3px;">IR</span>
+        <span onclick="document.getElementById('goes-img-main').src='{goes16_urls['visible']}'"
+              style="color:#AAAAAA;font-family:'Courier New',monospace;font-size:10px;
+                     cursor:pointer;padding:2px 6px;border:1px solid #333333;border-radius:3px;">VIS</span>
+        <span onclick="document.getElementById('goes-img-main').src='{goes16_urls['wv']}'"
+              style="color:#00CC77;font-family:'Courier New',monospace;font-size:10px;
+                     cursor:pointer;padding:2px 6px;border:1px solid #003322;border-radius:3px;">WV</span>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+setInterval(function(){{
+  var img=document.getElementById('goes-img-main');
+  if(img){{ var b=img.src.split('?')[0]; img.src=b+'?v='+Date.now(); }}
+}}, 300000);
+</script>""", height=610)
+st.markdown(f'<div style="font-family:\'Share Tech Mono\',monospace;font-size:0.62em;'
+            f'color:#3A5A6A;text-align:right;padding:4px 0;">'
+            f'NOAA GOES-16 &nbsp;&middot;&nbsp; NESDIS CDN &nbsp;&middot;&nbsp; '
+            f'SE Sector &nbsp;&middot;&nbsp; Updates every 5 minutes</div>',
+            unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
