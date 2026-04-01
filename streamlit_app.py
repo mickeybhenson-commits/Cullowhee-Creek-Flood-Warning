@@ -91,8 +91,11 @@ USGS_TUCK_SITE = "03508050"
 USGS_TUCK_DA   = 147.0
 
 LO_AREA_ACRES = 6200;  LO_DA_SQMI = 9.688;  LO_TC_HRS = 2.5;  LO_CN_II = 72
-LO_RATING_A   = 36.4;  LO_RATING_B = 2.30;  LO_BASEFLOW = 15.4
-LO_BANKFULL   = 2.64;  LO_BANKFULL_Q = 339.0
+LO_RATING_A   = 38.2;  LO_RATING_B = 1.293
+# Calibrated: at dry baseflow Q=234 cfs → depth = (234/38.2)^(1/1.293) = 4.0 ft
+# 12-ft constructed channel at WCU campus; observed baseflow ~4 ft sunny-day (Apr 2026)
+LO_BASEFLOW   = 234.0
+LO_BANKFULL   = 10.0;  LO_BANKFULL_Q = 766.0
 
 UP_AREA_ACRES = 2480;  UP_DA_SQMI = 3.875;  UP_TC_HRS = 1.2;  UP_CN_II = 70
 UP_RATING_A   = 39.1;  UP_RATING_B = 2.15;  UP_BASEFLOW = 6.2
@@ -924,7 +927,7 @@ def fetch_hwo():
         return None
 
 
-# ── NEW: NWPS — Tuckasegee at Bryson City River Forecast ─────────────────────
+# ── NWPS — Tuckasegee at Bryson City River Forecast ──────────────────────────
 
 @st.cache_data(ttl=900)
 def fetch_nwps_tuckasegee() -> dict:
@@ -984,7 +987,7 @@ def fetch_nwps_tuckasegee() -> dict:
         return {"ok": False, "source": "NWPS-TKSN7", "reason": str(exc)}
 
 
-# ── NEW: NOAA MRMS QPE via Iowa Environmental Mesonet ────────────────────────
+# ── NOAA MRMS QPE via Iowa Environmental Mesonet ─────────────────────────────
 
 @st.cache_data(ttl=600)
 def fetch_mrms_qpe() -> dict:
@@ -1025,7 +1028,7 @@ def fetch_mrms_qpe() -> dict:
         return {"ok": False, "source": "MRMS-IEM", "reason": str(exc)}
 
 
-# ── NEW: NASA POWER — SMAP-derived soil moisture ─────────────────────────────
+# ── NASA POWER — SMAP-derived soil moisture ───────────────────────────────────
 
 @st.cache_data(ttl=3600)
 def fetch_nasa_power_soil() -> dict:
@@ -1072,7 +1075,7 @@ def fetch_nasa_power_soil() -> dict:
         return {"ok": False, "source": "NASA-POWER", "reason": str(exc)}
 
 
-# ── NEW: NC State Climate Office — ACIS/PRISM Climate Data ───────────────────
+# ── NC State Climate Office — ACIS/PRISM Climate Data ────────────────────────
 
 @st.cache_data(ttl=3600)
 def fetch_ncstate_climate() -> dict:
@@ -1135,7 +1138,7 @@ def fetch_ncstate_climate() -> dict:
         return {"ok": False, "source": "ACIS-PRISM", "reason": str(exc)}
 
 
-# ── NEW: NC FIMAN — Jackson County Flood Inundation Alert Network ─────────────
+# ── NC FIMAN — Jackson County Flood Inundation Alert Network ──────────────────
 
 @st.cache_data(ttl=300)
 def fetch_fiman_jackson() -> dict:
@@ -1164,7 +1167,7 @@ def fetch_fiman_jackson() -> dict:
                 "map_url": "https://fiman.nc.gov/fiman/", "link_only": True}
 
 
-# ── NEW: NOAA GOES-16 Satellite Imagery ──────────────────────────────────────
+# ── NOAA GOES-16 Satellite Imagery ────────────────────────────────────────────
 
 def get_goes16_urls() -> dict:
     _cb = int(time.time() / 300)
@@ -1310,7 +1313,8 @@ def model_stream(soil_sat_pct, rain_24h, qpf_24h, rain_7d,
     Q_base   = baseflow * (1.0 + (soil_sat_pct/100.0) * 3.0)
     Q_recess = max(0.0, (rain_7d-rain_24h)*baseflow*RECESSION_K*5.0)
     Q_total  = round(max(baseflow*0.5, min(Q_base+Q_storm+Q_recess, bankfull_q*3.0)), 1)
-    depth_ft = round(max(0.20, min((Q_total/rating_a)**(1.0/rating_b), 9.0)), 2)
+    # Raised depth cap to 11.0 ft for 12-ft constructed channel at WCU campus
+    depth_ft = round(max(0.20, min((Q_total/rating_a)**(1.0/rating_b), 11.0)), 2)
     return depth_ft, Q_total
 
 def flood_threat_score(soil_sat, rain_24h, qpf_6h, pop_24h):
@@ -1746,19 +1750,21 @@ with u3:
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ── PANEL 4: LOWER WATERSHED ──────────────────────────────────────────────────
-_lo_max = LO_BANKFULL * 2.5
+# 12-ft constructed channel at WCU campus; gauge max set to actual channel depth
+_lo_max = 12.0
 st.markdown(f'<div class="lower-panel"><div class="lower-title">'
-            f'LOWER CULLOWHEE CREEK ({LO_AREA_ACRES:,} AC | {LO_DA_SQMI:.2f} mi²)</div>',
+            f'LOWER CULLOWHEE CREEK ({LO_AREA_ACRES:,} AC | {LO_DA_SQMI:.2f} mi²) '
+            f'&nbsp;&bull;&nbsp; 12-FT CONSTRUCTED CHANNEL &nbsp;&bull;&nbsp; BASEFLOW ~4.0 FT</div>',
             unsafe_allow_html=True)
 l1, l2, l3 = st.columns([2,2,3])
 with l1:
     st.components.v1.html(make_stream_gauge(
         "g_lo_depth", st.session_state.lo_depth, 0.0, _lo_max, " ft",
-        [{"range":[0.0,LO_BANKFULL*0.60],"color":"rgba(0,255,156,0.15)"},
-         {"range":[LO_BANKFULL*0.60,LO_BANKFULL*0.95],"color":"rgba(255,215,0,0.20)"},
-         {"range":[LO_BANKFULL*0.95,_lo_max],"color":"rgba(255,51,51,0.25)"}],
+        [{"range":[0.0, 5.0],            "color":"rgba(0,255,156,0.15)"},
+         {"range":[5.0, LO_BANKFULL],    "color":"rgba(255,215,0,0.20)"},
+         {"range":[LO_BANKFULL, _lo_max],"color":"rgba(255,51,51,0.25)"}],
         lo_depth_clr, lo_depth_lbl, lo_depth_clr,
-        f"Stage: {st.session_state.lo_depth:.2f} ft"), height=240)
+        f"Stage: {st.session_state.lo_depth:.2f} ft  |  Bankfull: {LO_BANKFULL:.0f} ft"), height=240)
 with l2:
     _lo_q_max = LO_BANKFULL_Q * 3.0
     st.components.v1.html(make_stream_gauge(
@@ -1778,6 +1784,10 @@ with l3:
               margin:6px 0 4px;">{soil_sat_lo:.1f}%</div>
   <div style="font-size:0.7em;color:#5AACD0;text-align:center;margin-bottom:12px;">
     stored: {soil_stored_lo:.2f}&quot; &nbsp;|&nbsp; pore capacity</div>
+  <div style="font-size:0.65em;color:#3A6A8A;text-align:center;border-top:1px solid rgba(0,119,255,0.15);
+              padding-top:8px;margin-top:4px;">
+    OBS BASEFLOW: ~4.0 ft &nbsp;&middot;&nbsp; BANKFULL: {LO_BANKFULL:.0f} ft &nbsp;&middot;&nbsp; CHANNEL: 12 ft
+  </div>
 </div>""", unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1810,7 +1820,7 @@ st.markdown(f"""
   <div style="background:rgba(0,100,200,0.07);border:1px solid rgba(0,119,255,0.25);
               border-radius:8px;padding:16px;text-align:center;">
     <div style="font-family:'Share Tech Mono',monospace;font-size:0.72em;color:#0099FF;
-                letter-spacing:2px;margin-bottom:8px;">LOWER</div>
+                letter-spacing:2px;margin-bottom:8px;">LOWER — WCU CAMPUS</div>
     <div style="font-size:0.75em;color:#7AACCC;margin-bottom:4px;">{LO_AREA_ACRES:,} ac | CN={LO_CN_II} | Tc={LO_TC_HRS}h</div>
     <div style="font-size:2.2em;font-weight:700;color:{lo_depth_clr};">{st.session_state.lo_depth:.2f} ft</div>
     <div style="font-size:1.1em;color:{lo_flow_clr};">{st.session_state.lo_flow:.1f} cfs</div>
